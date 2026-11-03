@@ -6,6 +6,7 @@ import { Engine, HttpError } from './engine.ts';
 import type { DisplayMode, GlassesEvent, GlassesReceipt, GlassesRequest } from './contracts.ts';
 import { profile } from './profile.ts';
 import { VoiceOverlayGuard } from './voice-overlay-guard.ts';
+import type { Clock } from './clock.ts';
 
 const execute = promisify(execFile);
 type Runner = (file: string, args: string[]) => Promise<string>;
@@ -21,7 +22,10 @@ export class DeviceControl {
   private readonly adb: string;
   private readonly packageName: string;
   private readonly run: Runner;
+  /** 墙钟：与已持久化的时间戳比较或写审计时间。 */
   private readonly now: () => number;
+  /** 单调钟：仅用于重试限频等间隔计时。 */
+  private readonly mono: () => number;
   private readonly scrcpy: string;
   private readonly wait: (ms: number) => Promise<void>;
   private mirror?: ChildProcess;
@@ -29,21 +33,23 @@ export class DeviceControl {
   private enabled: boolean;
   private working = false;
   private closed = false;
-  private lastAttempt = 0;
+  private lastAttempt = -Infinity;
   private task?: Promise<unknown>;
   private readonly voiceGuard: VoiceOverlayGuard;
   private diagnostics: { last_action: string | null; last_at: string | null; error: string | null } = { last_action: null, last_at: null, error: null };
 
   /** 绑定设备、ADB 执行器和持久化记录；重启后的在途通知只标为待核查。 */
-  constructor(engine: Engine, options: { serial?: string; adb?: string; packageName?: string; enabled?: boolean; run?: Runner; now?: () => number; scrcpy?: string; wait?: (ms: number) => Promise<void> } = {}) {
+  constructor(engine: Engine, options: { serial?: string; adb?: string; packageName?: string; enabled?: boolean; run?: Runner; clock?: Clock; now?: () => number; scrcpy?: string; wait?: (ms: number) => Promise<void> } = {}) {
     this.engine = engine; this.serial = options.serial ?? ''; this.adb = options.adb ?? 'adb';
     this.packageName = options.packageName ?? 'link.ironip.a5.rayneo';
     if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(this.packageName)) throw new Error('A5_RAYNEO_PACKAGE 包名无效。');
     this.run = options.run ?? (async (file, args) => (await execute(file, args, { windowsHide: true, timeout: 5000, maxBuffer: 1024 * 1024 })).stdout);
-    this.now = options.now ?? Date.now;
+    // 优先用注入的 clock；旧参数 now 仅作兼容，同时充当墙钟与单调钟（测试用假时钟）。
+    const clock: Clock = options.clock ?? (options.now ? { wall: options.now, mono: options.now } : engine.clock);
+    this.now = clock.wall; this.mono = clock.mono;
     this.scrcpy = options.scrcpy ?? 'scrcpy';
     this.wait = options.wait ?? delay;
-    this.voiceGuard = new VoiceOverlayGuard(engine.store, { serial: this.serial, adb: this.adb, run: this.run, now: this.now, audit: (action, detail) => this.audit(action, detail) });
+    this.voiceGuard = new VoiceOverlayGuard(engine.store, { serial: this.serial, adb: this.adb, run: this.run, clock, audit: (action, detail) => this.audit(action, detail) });
     this.engine.store.db.exec('CREATE TABLE IF NOT EXISTS device_debug_requests(request_id TEXT PRIMARY KEY,data TEXT NOT NULL)');
     const saved = this.engine.store.setting<boolean>('device_host_enabled');
     this.enabled = saved ?? options.enabled ?? true;
@@ -232,13 +238,13 @@ export class DeviceControl {
     if (!this.enabled && !voiceDue) return;
     const state = this.engine.adapter.getStatus();
     if (state.connected && state.ready || !this.enabled) {
-      if (!voiceDue || this.now() - this.lastAttempt < 5000) return;
-      this.lastAttempt = this.now(); this.working = true;
+      if (!voiceDue || this.mono() - this.lastAttempt < 5000) return;
+      this.lastAttempt = this.mono(); this.working = true;
       this.task = this.voiceGuard.sync(this.enabled).catch(error => this.reportTickError(error)).finally(() => { this.working = false; });
       return;
     }
-    if (this.now() - this.lastAttempt < 5000) return;
-    this.lastAttempt = this.now();
+    if (this.mono() - this.lastAttempt < 5000) return;
+    this.lastAttempt = this.mono();
     void this.action({ action: 'open' }).catch(() => { /* 具体错误已写入控制诊断与审计，下一次限频恢复。 */ });
   }
   /** 退出时最多等待十五秒回收展示结束证据，安全后恢复原权限；故障时保留备份。 */

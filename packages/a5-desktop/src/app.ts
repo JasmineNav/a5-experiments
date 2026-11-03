@@ -30,10 +30,12 @@ export function createApp(engine: Engine, exportRoot: string, deviceControl?: De
   const json = (response: ServerResponse, value: unknown, status = 200) => {
     response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); response.end(JSON.stringify(value));
   };
-  const connections = new Map<string, { seen: number }>();
+  const clock = engine.clock;
+  // 在线判定是间隔计时，用单调钟；last_seen_at 仅供展示，用墙钟。
+  const connections = new Map<string, { seen_mono: number; seen_wall: number }>();
   const connection = (id: string) => {
     const client = connections.get(id);
-    return { connected: !!client && Date.now() - client.seen < 10000, last_seen_at: client ? new Date(client.seen).toISOString() : null };
+    return { connected: !!client && clock.mono() - client.seen_mono < 10000, last_seen_at: client ? new Date(client.seen_wall).toISOString() : null };
   };
   const server = createServer(async (request, response) => {
     response.setHeader('Cache-Control', 'no-store'); response.setHeader('X-Content-Type-Options', 'nosniff'); response.setHeader('Referrer-Policy', 'no-referrer');
@@ -108,7 +110,7 @@ export function createApp(engine: Engine, exportRoot: string, deviceControl?: De
       const participantPath = /^\/api\/participant\/sessions\/([a-f0-9-]+)(?:\/(commands|read-notice-click|confirm-message|assets\/image\d+\.png))?$/.exec(path);
       if (participantPath) {
         const [, id, resource] = participantPath; engine.authenticate(id, bearer(request));
-        connections.set(id, { seen: Date.now() });
+        connections.set(id, { seen_mono: clock.mono(), seen_wall: clock.wall() });
         if (method === 'GET' && !resource) { json(response, engine.view(id)); return; }
         if(method==='POST' && resource==='read-notice-click') {json(response,await engine.readNoticeClick(id,await body(request)));return;}
         if (method === 'POST' && resource === 'confirm-message') {

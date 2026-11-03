@@ -6,6 +6,8 @@ import type { DataTable, Field, Snapshot, Unit } from './tasks.ts';
 import type { Condition, DisplayMode, GlassesAdapter, GlassesEvent, GlassesReceipt, Participant, ParticipantConfig } from './contracts.ts';
 import { profile, stageIds } from './profile.ts';
 import { validateConfig } from './config.ts';
+import { systemClock } from './clock.ts';
+import type { Clock } from './clock.ts';
 
 export class HttpError extends Error {
   status: number;
@@ -132,14 +134,16 @@ export class Engine {
   readonly store: Store;
   readonly adapter: GlassesAdapter;
   readonly material: Material;
+  /** 注入的统一时间源；设备控制与 HTTP 层共用，测试可整体替换。 */
+  readonly clock: Clock;
   private readonly wallNow: () => number;
   private readonly monoNow: () => number;
   private readonly clocks = new Map<string, { base: number; origin: number }>();
   private readonly pending = new Set<Promise<void>>();
 
-  constructor(store: Store, adapter: GlassesAdapter, material: Material, initialConfig: ParticipantConfig, clock?: { wall: () => number; mono: () => number }) {
-    this.store = store; this.adapter = adapter; this.material = material;
-    this.wallNow = clock?.wall ?? Date.now; this.monoNow = clock?.mono ?? (() => performance.now());
+  constructor(store: Store, adapter: GlassesAdapter, material: Material, initialConfig: ParticipantConfig, clock: Clock = systemClock) {
+    this.store = store; this.adapter = adapter; this.material = material; this.clock = clock;
+    this.wallNow = clock.wall; this.monoNow = clock.mono;
     if (!store.setting('participants')) this.importConfig(initialConfig);
     for (const id of store.allIds()) {
       const session = this.session(id);

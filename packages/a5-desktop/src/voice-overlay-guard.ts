@@ -1,4 +1,5 @@
 import type { Store } from './store.ts';
+import type { Clock } from './clock.ts';
 
 type Runner = (file: string, args: string[]) => Promise<string>;
 
@@ -8,14 +9,14 @@ export class VoiceOverlayGuard {
   private readonly serial: string;
   private readonly adb: string;
   private readonly run: Runner;
-  private readonly now: () => number;
+  private readonly clock: Clock;
   private readonly audit: (action: string, detail: unknown) => void;
   private checkedAt = -Infinity;
   private value = { state: 'pending', package_name: 'com.rayneo.aispeech', checked_at: null as string | null, error: null as string | null };
 
   /** 绑定设备级权限备份、ADB 执行器和审计回调。 */
-  constructor(store: Store, options: { serial: string; adb: string; run: Runner; now: () => number; audit: (action: string, detail: unknown) => void }) {
-    this.store = store; this.serial = options.serial; this.adb = options.adb; this.run = options.run; this.now = options.now; this.audit = options.audit;
+  constructor(store: Store, options: { serial: string; adb: string; run: Runner; clock: Clock; audit: (action: string, detail: unknown) => void }) {
+    this.store = store; this.serial = options.serial; this.adb = options.adb; this.run = options.run; this.clock = options.clock; this.audit = options.audit;
   }
   /** 将权限备份按设备序列号隔离，防止跨设备恢复。 */
   private key() { return `device_voice_overlay_backup:${this.serial}`; }
@@ -27,7 +28,7 @@ export class VoiceOverlayGuard {
     catch { return true; }
   }
   /** 开启时每三十秒核对，关闭后持续尝试恢复尚存的备份。 */
-  due(enabled: boolean) { return enabled ? this.now() - this.checkedAt >= 30000 : this.hasBackup(); }
+  due(enabled: boolean) { return enabled ? this.clock.mono() - this.checkedAt >= 30000 : this.hasBackup(); }
   /** 返回最近一次权限核对的结果快照。 */
   status() { return { ...this.value }; }
   /** 读取目标包的悬浮窗 AppOps 模式，无法确认时拒绝猜测。 */
@@ -40,7 +41,7 @@ export class VoiceOverlayGuard {
   }
   /** 先备份再设置并读回确认；恢复成功后才清除原权限备份。 */
   async sync(enabled: boolean) {
-    this.checkedAt = this.now(); this.value.checked_at = new Date(this.now()).toISOString();
+    this.checkedAt = this.clock.mono(); this.value.checked_at = new Date(this.clock.wall()).toISOString();
     try {
       const backup = this.backup();
       if (!enabled && !backup) { this.value.state = 'restored'; this.value.error = null; return; }
