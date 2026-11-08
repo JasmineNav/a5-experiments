@@ -11,7 +11,7 @@ import type {Capabilities} from '@lab/glasses-display';
 const caps:Capabilities={commands:['show_text','confirm','cancel'],display_modes:['timed','confirm_until_ack'],text_duration_ms:{min:1000,max:60000},tone:true,tone_presets:['notification']};
 async function fixture(serial='USB1234',db=':memory:'){
  const store=new Store(db);let route=serial,connected=true,ready=true,busy=false,transport='device',now=200000,refused=false,canRecover=true,sends=0,voice='allow';const calls:string[][]=[];
- const adapter:GlassesAdapter={getStatus:()=>({source:'device',connected,ready,busy,route,device_id:`adb:${route}`,capabilities:caps,network:'lab',device_info:{app_version:'2.2.0'}}),probe:async()=>{},setRoute:async value=>{route=value;},clockSample:async()=>({device_monotonic_ms:1234,clock_id:'boot'}),send:async()=>{sends++;throw new Error('unexpected stimulus');},close:async()=>{}};
+ const adapter:GlassesAdapter={getStatus:()=>({source:'device',connected,ready,busy,route,device_id:`adb:${route}`,capabilities:caps,network:'lab',device_info:{app_version:'2.2.1'}}),probe:async()=>{},setRoute:async value=>{route=value;},clockSample:async()=>({device_monotonic_ms:1234,clock_id:'boot'}),send:async()=>{sends++;throw new Error('unexpected stimulus');},close:async()=>{}};
  const engine=new Engine(store,adapter,await loadMaterial(),await testConfig());
  const run=async(_file:string,args:string[])=>{
   calls.push(args);
@@ -23,7 +23,7 @@ async function fixture(serial='USB1234',db=':memory:'){
   if(args.includes('wifi'))return 'Wifi is connected to "lab"';
   if(args.includes('appops')){if(args.includes('set'))voice=args.at(-1)!;return `SYSTEM_ALERT_WINDOW: ${voice}`;}
   if(args.includes('start')&&args.includes('am')){if(canRecover){connected=true;ready=true;}return 'Starting';}
-  if(args.includes('package'))return 'versionName=2.2.0';
+  if(args.includes('package'))return 'versionName=2.2.1';
   if(args.includes('window'))return 'mCurrentFocus=Window link.ironip.glasses.display';
   if(args.includes('battery'))return 'level: 80\nUSB powered: true';return 'ok';
  };

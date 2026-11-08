@@ -4,8 +4,8 @@
 
 Clawd 的 `95f7501`（共享 Clock）与 `4a627ef`（乐观锁/追加历史）已保留在 main；没有打开的对应 PR，main 原已包含两提交，本次将 origin/main 快进到 4a627ef。没有改写其他助手的工作树。
 
-共享仓库 `vendor/glasses-display` 是 git submodule，固定 **v2.2.0 / 4037b73b089202e7d70cde5a8bb4715a2f9a6dd3**。
-最初 v2.1.0 已完成并发布，之后扩大 APK 为通用能力层，所以以新增 v2.2.0 交付；不覆盖旧标签。
+共享仓库 `vendor/glasses-display` 是 git submodule，固定 **v2.2.1 / f9b4e9a244359b5e33c4bf3151510fa035fe8836**。
+最初 v2.1.0 已完成并发布，之后扩大 APK 为通用能力层，所以以新增 v2.2.1 交付；不覆盖旧标签。
 安装依赖前执行：
 
 ```sh
@@ -30,11 +30,11 @@ npm ci
 
 Windows 公共菜单首次无本机配置也走真机 Web 整备入口；先开后端/管理页，不要求眼镜已连接或 ADB 已可用。Mock 必须显式选择，运行中不静默切换模式。
 
-启动脚本保留安装逻辑，包名 `link.ironip.glasses.display`、版本 `2.2.0`，默认 APK `.a5-local/artifacts/glasses-display-2.2.0-debug.apk`。版本不一致时先核对 SHA-256，再 `install -r`，安装后读回版本；不卸载、不清账本。硬件未就绪不关后台，在 Web 继续整备。无线开启后可拔 USB；设备重启后可能需再插 USB 开启 adbd TCP。
+启动脚本保留安装逻辑，包名 `link.ironip.glasses.display`、版本 `2.2.1`，默认 APK `.a5-local/artifacts/glasses-display-2.2.1-debug.apk`。版本不一致时先核对 SHA-256，再 `install -r`，安装后读回版本；不卸载、不清账本。硬件未就绪不关后台，在 Web 继续整备。无线开启后可拔 USB；设备重启后可能需再插 USB 开启 adbd TCP。
 
-本次构建产物：`/workspace/artifacts/glasses-display/v2.2.0/glasses-display-2.2.0-debug.apk`
+本次构建产物：`/workspace/artifacts/glasses-display/v2.2.1/glasses-display-2.2.1-debug.apk`
 
-SHA-256：`ee4f46b806581c1be471eaa81d1a37447d6dace961a883c4d8f0673f14a6895d`
+SHA-256：`a47d9993827b6fff15fbf2347c7ca5d8fc71ed15e0dae74d5ac0f4106e848dff`
 
 ## 不变量
 
@@ -49,3 +49,5 @@ SHA-256：`ee4f46b806581c1be471eaa81d1a37447d6dace961a883c4d8f0673f14a6895d`
 完整测试命令：`npm test`（SH 129/129、SL 22/22、启动器 9/9，共 160/160）、`npm run typecheck`（全工作区通过）。新增覆盖 USB→无线、offline 修复与退避、磁盘重启路由召回、硬件身份路由切换事件恢复、跳过其他身份但推进游标、展示互斥、空闲退出 force-stop、能力与 tone 映射、应用守护停止、自检时钟样本、HTTP 整备入口。
 
 没有实体眼镜/Windows 桌面验收。待验证：USB/adbd 切无线真实网络、断网/设备重启恢复、权限提示与语音助手读回、scrcpy 实际画面、左右眼渲染与隐藏时序、音调实际可听及电声延迟、Windows 首次/升级/无 ADB 启动流程。APK 新增传感器/相机/录音/TTS/振动等能力也仅完成编译/策略测试，运行时按实际硬件/权限报告。
+
+最终固定 2.2.1：2.2.0 通用能力增量后的正确性修补（keep-awake/兼容锁、亮度恢复、相机初始化清理）；旧标签全部保留。

@@ -15,8 +15,8 @@ const experimentIndex = process.argv.indexOf('--experiment');
 const name = experimentIndex === -1 ? 'f5-sh-pilot' : process.argv[experimentIndex + 1];
 if (!/^f5-(sh|sl)-[a-z0-9-]+$/.test(name ?? '')) throw new Error('--experiment 必须是 f5-sh-* 或 f5-sl-* 实验目录名。');
 const pkg = 'link.ironip.glasses.display';
-const expectedVersion='2.2.0';
-const expectedSha='ee4f46b806581c1be471eaa81d1a37447d6dace961a883c4d8f0673f14a6895d';
+const expectedVersion='2.2.1';
+const expectedSha='a47d9993827b6fff15fbf2347c7ca5d8fc71ed15e0dae74d5ac0f4106e848dff';
 const configPath = join(local, 'device.json');
 const action = process.argv[2] ?? 'start';
 const noOpen = process.argv.includes('--no-open');
@@ -71,7 +71,7 @@ async function device() {
   try { await execute(localScrcpy, ['--version'], { cwd: root, windowsHide: true, timeout: 5000 }); scrcpyPath = localScrcpy; } catch {}
   return { connected:true,adb, serial, port: requestedPort ?? (name === 'f5-sh-pilot' ? config.port ?? 5173 : undefined), packageName, scrcpyPath,
     activityName: `${packageName}/link.ironip.glasses.display.MainActivity`,
-    apkPath: config.packageName===pkg&&config.apkPath?config.apkPath:join(local,'artifacts','glasses-display-2.2.0-debug.apk'),
+    apkPath: config.packageName===pkg&&config.apkPath?config.apkPath:join(local,'artifacts','glasses-display-2.2.1-debug.apk'),
     apkSha256:config.packageName===pkg&&config.apkSha256?config.apkSha256:expectedSha };
 }
 async function health(port) {

@@ -97,7 +97,7 @@ export class DeviceControl {
   /** 返回后台设备控制快照，包括守护诊断、独立通知与审计。 */
   status() {
     return { supported: this.supported(), enabled: this.supported() && this.enabled, working: this.working,
-      route:this.serial,identity_mode:this.identity,hardware_id:this.hardwareId??null,expected_app_version:'2.2.0',link:this.link.status(),remembered_routes:this.routes.all(),
+      route:this.serial,identity_mode:this.identity,hardware_id:this.hardwareId??null,expected_app_version:'2.2.1',link:this.link.status(),remembered_routes:this.routes.all(),
       host_stall:this.hostStall,host_retry_in_ms:this.hostStall||!this.hostBackoff.attempts?null:Number.isFinite(this.hostBackoff.nextAt)?Math.max(0,this.hostBackoff.nextAt-this.mono()):null,doctor:this.lastDoctor,clock_samples:this.clockSamples,
       package_name: this.packageName, ...this.diagnostics, active_session: this.activeSession(), voice_guard: this.voiceGuard.status(),
       scrcpy: { running: !!this.mirror && this.mirror.exitCode === null, crop: '640:480:0:0', error: this.mirrorError },
@@ -350,7 +350,7 @@ export class DeviceControl {
     await this.bind(route,saved?.identity??this.identity);this.audit('route_recall',{route});
   }
   async doctor(){return this.exclusive(async()=>{
-    const report=await runDoctor({run:this.run,adb:this.adb,scrcpy:this.scrcpy,route:this.serial||undefined,packageName:this.packageName,expectedVersion:'2.2.0',expectedDeviceId:this.hardwareId,env:{adb:'A5_ADB_PATH',scrcpy:'A5_SCRCPY_PATH'}});
+    const report=await runDoctor({run:this.run,adb:this.adb,scrcpy:this.scrcpy,route:this.serial||undefined,packageName:this.packageName,expectedVersion:'2.2.1',expectedDeviceId:this.hardwareId,env:{adb:'A5_ADB_PATH',scrcpy:'A5_SCRCPY_PATH'}});
     await this.engine.adapter.probe?.();const s=this.engine.adapter.getStatus();
     report.checks.push({id:'display_channel',label:'显示端通道',status:s.connected&&s.ready?'ok':'fail',detail:s.error??s.device_info?.app_version??'未就绪',next:s.connected&&s.ready?null:'先连接通道，再打开显示端'});
     this.clockSamples=[];if(s.connected&&this.engine.adapter.clockSample)for(let i=0;i<3;i++){const start=this.mono();const sample=await this.engine.adapter.clockSample();this.clockSamples.push({...sample,rtt_ms:this.mono()-start});}

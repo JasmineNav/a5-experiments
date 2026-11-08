@@ -42,4 +42,4 @@ Windows 检出时请保留 `.gitattributes`：材料源文件 `f5-sh-pilot/docs/
 
 ## 共享显示端迁移
 
-固定 `vendor/glasses-display` v2.2.0；提示音由 APK 播放，按能力声明检查，不降级为无声。整备结构、构建产物、协议映射、测试与真机待验清单见 [迁移说明](docs/glasses-display-migration.md)。
+固定 `vendor/glasses-display` v2.2.1；提示音由 APK 播放，按能力声明检查，不降级为无声。整备结构、构建产物、协议映射、测试与真机待验清单见 [迁移说明](docs/glasses-display-migration.md)。
