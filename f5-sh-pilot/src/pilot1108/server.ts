@@ -7,20 +7,13 @@ import type { Config } from './model.ts';
 
 const port = Number(process.env.PORT ?? 5173);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT必须是1—65535的整数。');
-const flag = (name: string) => {
-  const value = process.env[name];
-  if (value === undefined) return false;
-  if (!['true', 'false'].includes(value)) throw new Error(`${name}只能为true或false。`);
-  return value === 'true';
-};
-const defaults: Partial<Config> = {
-  feedback: (process.env.A5_PILOT_FEEDBACK ?? 'progress') as Config['feedback'],
-  source: (process.env.A5_PILOT_SOURCE ?? 'participant') as Config['source'],
-  practiceScales: flag('A5_PILOT_PRACTICE_SCALES'), practiceFeedback: flag('A5_PILOT_PRACTICE_FEEDBACK'),
-};
+for (const [name, expected] of Object.entries({ A5_PILOT_FEEDBACK: 'progress', A5_PILOT_SOURCE: 'participant', A5_PILOT_PRACTICE_SCALES: 'false', A5_PILOT_PRACTICE_FEEDBACK: 'false' })) {
+  if (process.env[name] !== undefined && process.env[name] !== expected) throw new Error(`${name}本版固定为${expected}，请移除旧配置。`);
+}
+const defaults: Partial<Config> = { feedback: 'progress', source: 'participant', practiceScales: false, practiceFeedback: false };
 if (process.env.A5_PILOT_ORDER) defaults.order = process.env.A5_PILOT_ORDER as Config['order'];
 configuration('P01', defaults); // 错误配置在启动阶段即失败，不静默回退。
-const runtime = resolve(process.env.A5_PILOT_RUNTIME_DIR ?? join(import.meta.dirname, '../../runtime/pilot-1108'));
+const runtime = resolve(process.env.A5_PILOT_RUNTIME_DIR ?? join(import.meta.dirname, '../../runtime/pilot-1108-r2'));
 await mkdir(runtime, { recursive: true });
 const store = new PilotStore(join(runtime, 'pilot.sqlite'));
 const server = createPilotApp(store, defaults);

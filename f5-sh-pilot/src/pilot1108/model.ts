@@ -1,13 +1,14 @@
+import { feeFilled, planSelection, filledState } from '../../public/pilot1108/rules.js';
 /** 11-08 材料可行性 pilot；不加载正式 SH 状态机或眼镜适配器。 */
 export const PLANS = ['A', 'B', 'C', 'D'] as const;
 export const FIELDS = ['qualified', ...PLANS] as const;
 export type Field = typeof FIELDS[number];
 export type Answers = Record<Field, string>;
-export type Feedback = 'registered' | 'progress' | 'message';
+export type Feedback = 'progress';
 export type Order = 'no-feedback-first' | 'feedback-first';
 export interface Config {
-  feedback: Feedback; order: Order; source: 'participant' | 'standard';
-  practiceScales: boolean; practiceFeedback: boolean;
+  feedback: Feedback; order: Order; source: 'participant';
+  practiceScales: false; practiceFeedback: false;
 }
 export interface Task {
   id: string; title: string; practice: boolean; feedback: boolean;
@@ -34,15 +35,15 @@ export function configuration(participant: string, input: Partial<Config> = {}):
   // 四人一组：前两位无反馈先，后两位有反馈先；没有编号时必须显式指定。
   const order = input.order ?? (n > 0 ? ((n - 1) % 4 < 2 ? 'no-feedback-first' : 'feedback-first') : undefined);
   const config = { feedback: 'progress', source: 'participant', practiceScales: false, practiceFeedback: false, ...input, order };
-  if (!['registered', 'progress', 'message'].includes(config.feedback!) || !['participant', 'standard'].includes(config.source!) ||
-      !['no-feedback-first', 'feedback-first'].includes(config.order!) || typeof config.practiceScales !== 'boolean' || typeof config.practiceFeedback !== 'boolean') {
-    throw new Error('反馈类型、顺序或练习配置无效；无数字编号时请显式指定顺序。');
+  if (config.feedback !== 'progress' || config.source !== 'participant' ||
+      !['no-feedback-first', 'feedback-first'].includes(config.order!) || config.practiceScales !== false || config.practiceFeedback !== false) {
+    throw new Error('本版固定五节点进度、誊写本人答案、练习无量表无反馈；顺序须有效，无数字编号时请显式指定。');
   }
   return config as Config;
 }
 export function taskSequence(config: Config): Task[] {
   const formal = config.order === 'feedback-first' ? [WITH_FEEDBACK, NO_FEEDBACK] : [NO_FEEDBACK, WITH_FEEDBACK];
-  return structuredClone([{ ...PRACTICE, feedback: config.practiceFeedback }, ...formal]);
+  return structuredClone([PRACTICE, ...formal]);
 }
 export function standard(task: Task): Answers {
   const costs = Object.fromEntries(task.rows.map(r => [r.plan, ((Math.round(r.base * 100) + Math.round(r.extra * 100)) / 100).toFixed(2)]));
@@ -50,12 +51,8 @@ export function standard(task: Task): Answers {
 }
 export const emptyAnswers = (): Answers => ({ qualified: '', A: '', B: '', C: '', D: '' });
 export function numeric(value: string): boolean { return /^\d+(?:\.\d{1,2})?$/.test(value.trim()) && Number.isFinite(Number(value)); }
-export function qualified(value: string): string[] | null {
-  const text = value.trim().toUpperCase();
-  if (!/^[ABCD\s,，、;；]+$/.test(text)) return null;
-  return [...new Set(text.replace(/[^ABCD]/g, '').split(''))].sort();
-}
-export function complete(answers: Answers): boolean { return FIELDS.every(f => f === 'qualified' ? qualified(answers[f]) !== null : numeric(answers[f])); }
+export const qualified = planSelection;
+export function complete(answers: Answers): boolean { return Object.values(filledState(answers)).every(Boolean); }
 export function score(actual: Answers, expected: Answers) {
   const fields = Object.fromEntries(FIELDS.map(f => [f, f === 'qualified'
     ? qualified(actual[f]) !== null && JSON.stringify(qualified(actual[f])) === JSON.stringify(qualified(expected[f]))
@@ -63,13 +60,13 @@ export function score(actual: Answers, expected: Answers) {
   return { fields, correct: Object.values(fields).filter(Boolean).length, denominator: FIELDS.length,
     accuracy: Object.values(fields).filter(Boolean).length / FIELDS.length };
 }
-export type Stage = 'requirements' | 'compute' | 'scale1' | 'transcribe' | 'scale2' | 'done';
+export type Stage = 'requirements' | 'compute' | 'transcribe' | 'ratings' | 'done';
 export type Ratings = Record<string, number>;
 export const SCALE_ITEMS = [
   { key: 'mental', label: '心理需求', question: '完成这一阶段，您需要花多大程度的心力来思考和处理信息？' },
   { key: 'integration', label: '信息整合需求', question: '在这一阶段，您需要综合多项信息才能作出判断的程度有多高？' },
   { key: 'effort', label: '需要付出的努力', question: '为完成这一阶段，您实际投入的努力程度有多高？' },
-  { key: 'relaxation', label: '放松感', question: '回想刚刚在记录最终答案的过程中，您心里有多放松？' },
+  { key: 'relaxation', label: '放松感', question: '回想刚刚在这一阶段的过程中，您心里有多放松？' },
 ];
 export interface Trial {
   task: Task; compute: Answers; transcription: Answers; source: Answers | null;
@@ -79,15 +76,15 @@ export interface Trial {
   scale1: Ratings | null; scale2: Ratings | null;
 }
 export interface State {
-  schema_version: 1; material_version: 'sh-pilot-2026-11-08'; id: string; participant: string; config: Config;
+  schema_version: 2; material_version: 'sh-pilot-2026-11-08-r2'; id: string; participant: string; config: Config;
   trials: Trial[]; index: number; stage: Stage; revision: number; elapsed_ms: number; created_at: string;
 }
 export type Action = { type: 'compute' | 'requirements' | 'next' } |
-  { type: 'input'; field: Field; value: string } | { type: 'ratings'; values: Ratings };
+  { type: 'input'; field: Field; value: string } | { type: 'ratings'; values: { phase1: Ratings; phase2: Ratings } };
 export interface Event { type: string; elapsed_ms: number; task_id: string; stage?: Stage; data: unknown }
 export function initial(id: string, participant: string, config: Config, at: string): State {
   if (!/^[A-Za-z0-9_-]{1,40}$/.test(participant)) throw new Error('被试编号仅允许1—40位字母、数字、下划线或连字符。');
-  return { schema_version: 1, material_version: 'sh-pilot-2026-11-08', id, participant, config, created_at: at,
+  return { schema_version: 2, material_version: 'sh-pilot-2026-11-08-r2', id, participant, config, created_at: at,
     index: 0, stage: 'requirements', revision: 0, elapsed_ms: 0,
     trials: taskSequence(config).map(task => ({ task, compute: emptyAnswers(), transcription: emptyAnswers(), source: null,
       started_ms: 0, first_compute_ms: null, step1_end_ms: null, step2_start_ms: null, step2_end_ms: null,
@@ -110,7 +107,6 @@ export function transition(previous: State, action: Action, now: number): { stat
   const t = state.trials[state.index];
   const events = marker(state, now);
   const emit = (type: string, data: unknown = {}) => events.push({ type, elapsed_ms: now, task_id: t.task.id, stage: state.stage, data });
-  const scales = !t.task.practice || state.config.practiceScales;
   const startTranscription = () => { state.stage = 'transcribe'; t.step2_start_ms = now; emit('phase2_started'); };
   if (action.type === 'compute' && state.stage === 'requirements') {
     state.stage = 'compute'; t.first_compute_ms ??= now; emit('compute_opened');
@@ -121,32 +117,38 @@ export function transition(previous: State, action: Action, now: number): { stat
     const answers = state.stage === 'compute' ? t.compute : t.transcription;
     const before = answers[action.field]; answers[action.field] = action.value;
     emit('input_changed', { phase: state.stage, field: action.field, previous: before, value: action.value });
-    if (state.stage === 'compute' && action.field === 'B' && action.value.trim() && numeric(t.compute.A) && t.t0_ms === null) {
-      t.t0_ms = now; emit('t0_behavioral_candidate', { rule: 'first_B_input_after_numeric_A', a_value: t.compute.A, b_value: action.value, actual_interruption: false });
+    if (state.stage === 'compute' && action.field === 'B' && action.value.trim() && feeFilled(t.compute.A) && t.t0_ms === null) {
+      t.t0_ms = now; emit('t0_behavioral_candidate', { rule: 'first_B_input_after_two_decimal_A', a_value: t.compute.A, b_value: action.value, actual_interruption: false });
     }
     if (state.stage === 'transcribe' && action.field === 'B' && action.value.trim() && t.t2_ms === null) {
       t.t2_ms = now; emit('t2_candidate', { rule: 'first_B_transcription_input', actual_interruption: false });
     }
     if (state.stage === 'transcribe' && t.task.feedback) emit('completion_feedback_state', { feedback: state.config.feedback,
-      filled: Object.fromEntries(FIELDS.map(f => [f, Boolean(answers[f].trim())])), completed: FIELDS.filter(f => answers[f].trim()).length,
+      filled: filledState(answers), completed: Object.values(filledState(answers)).filter(Boolean).length,
       means_correct: false });
   } else if (action.type === 'next' && state.stage === 'compute') {
-    if (!complete(t.compute)) throw new Error('请填写四项费用（最多两位小数）及合格方案编号，再进入下一步。');
+    if (!complete(t.compute)) throw new Error('请填写四项费用（必须两位小数）及合格方案编号，再进入下一步。');
     t.step1_end_ms = now; t.t1_ms = now;
-    t.source = state.config.source === 'participant' ? structuredClone(t.compute) : standard(t.task);
+    t.source = structuredClone(t.compute);
     emit('phase1_submitted', { participant_answers: t.compute, standard_answers: standard(t.task), source: t.source, source_mode: state.config.source, score: score(t.compute, standard(t.task)) });
     emit('t1_candidate', { rule: 'phase1_next_clicked', actual_interruption: false });
-    if (scales) state.stage = 'scale1'; else startTranscription();
+    startTranscription();
   } else if (action.type === 'next' && state.stage === 'transcribe') {
-    if (!complete(t.transcription)) throw new Error('请填写全部登记结果（费用最多两位小数，方案编号可用顿号分隔）。');
+    if (!complete(t.transcription)) throw new Error('请填写全部登记结果（费用必须两位小数，方案编号可用顿号分隔）。');
     t.step2_end_ms = now;
     emit('phase2_submitted', { answers: t.transcription, objective_score: score(t.transcription, standard(t.task)), copy_score: score(t.transcription, t.source!) });
-    if (scales) state.stage = 'scale2'; else finish();
-  } else if (action.type === 'ratings' && ['scale1', 'scale2'].includes(state.stage)) {
-    const keys = SCALE_ITEMS.slice(0, state.stage === 'scale1' ? 3 : 4).map(i => i.key);
-    if (!action.values || typeof action.values !== 'object' || Object.keys(action.values).length !== keys.length || keys.some(k => !Number.isInteger(action.values[k]) || action.values[k] < 1 || action.values[k] > 7)) throw new Error('请完成本阶段全部1—7分量表。');
-    if (state.stage === 'scale1') { t.scale1 = action.values; emit('phase1_ratings', action.values); startTranscription(); }
-    else { t.scale2 = action.values; emit('phase2_ratings', action.values); finish(); }
+    if (t.task.practice) finish();
+    else { state.stage = 'ratings'; emit('questionnaire_opened', { timing: 'after_compute_and_transcription' }); }
+  } else if (action.type === 'ratings' && state.stage === 'ratings') {
+    const keys = SCALE_ITEMS.map(i => i.key);
+    const valid = (values: Ratings | undefined) => values && typeof values === 'object' && !Array.isArray(values) &&
+      Object.keys(values).length === keys.length && keys.every(k => Number.isInteger(values[k]) && values[k] >= 1 && values[k] <= 7);
+    if (!action.values || typeof action.values !== 'object' || Object.keys(action.values).length !== 2 ||
+        !valid(action.values.phase1) || !valid(action.values.phase2)) throw new Error('请完成两个阶段各四项1—7分量表。');
+    t.scale1 = action.values.phase1; t.scale2 = action.values.phase2;
+    emit('phase1_ratings', { ...t.scale1, timing: 'post_task_retrospective' });
+    emit('phase2_ratings', { ...t.scale2, timing: 'post_task_retrospective' });
+    finish();
   } else throw new Error('当前页面不允许此操作。');
   function finish() {
     emit('trial_finished', summary(t));
@@ -167,15 +169,18 @@ export function summary(t: Trial) {
     phase2_objective_accuracy: t.step2_end_ms === null ? null : score(t.transcription, standard(t.task)),
     phase2_copy_accuracy: t.step2_end_ms === null || !t.source ? null : score(t.transcription, t.source),
     t0_candidate_ms: t.t0_ms, t0_20s_candidate_ms: t.t0_20s_ms, t1_candidate_ms: t.t1_ms, t2_candidate_ms: t.t2_ms,
-    scale1: t.scale1, scale2: t.scale2 };
+    ratings_timing: 'post_task_retrospective', scale1: t.scale1, scale2: t.scale2 };
 }
-/** 公开视图不泄露标准答案/正确率；界面3只返回配置所指定的誊写来源。 */
+/** 公开视图不泄露标准答案/正确率；界面3固定返回被试本人刚才的计算输入。 */
 export function view(state: State) {
   const t = state.trials[state.index];
   return { id: state.id, participant: state.participant, stage: state.stage, revision: state.revision,
     trial_number: state.index + 1, task_count: state.trials.length, task: t.task,
-    feedback: t.task.feedback ? state.config.feedback : null,
+    feedback: state.stage === 'transcribe' && t.task.feedback ? 'progress' as const : null,
     answers: state.stage === 'transcribe' ? t.transcription : t.compute,
     source: state.stage === 'transcribe' ? t.source : null,
-    scale_items: state.stage === 'scale1' ? SCALE_ITEMS.slice(0, 3) : SCALE_ITEMS };
+    scale_phases: [
+      { key: 'phase1', label: '第一阶段：读要求、算费用、选方案', items: SCALE_ITEMS.map(i => ({ ...i, question: i.key === 'relaxation' ? '回想刚才读要求、计算和筛选方案的过程中，您心里有多放松？' : i.question })) },
+      { key: 'phase2', label: '第二阶段：照着结果填写', items: SCALE_ITEMS.map(i => ({ ...i, question: i.key === 'relaxation' ? '回想刚刚在记录最终答案的过程中，您心里有多放松？' : i.question })) },
+    ] };
 }

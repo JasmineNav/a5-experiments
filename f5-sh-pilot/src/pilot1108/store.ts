@@ -18,6 +18,10 @@ export class PilotStore {
       CREATE TABLE IF NOT EXISTS pilot_command_responses(session_id TEXT NOT NULL REFERENCES sessions(id), command_id TEXT NOT NULL, response TEXT NOT NULL, PRIMARY KEY(session_id,command_id));
       CREATE TRIGGER IF NOT EXISTS pilot_responses_no_update BEFORE UPDATE ON pilot_command_responses BEGIN SELECT RAISE(ABORT,'pilot响应只允许追加'); END;
       CREATE TRIGGER IF NOT EXISTS pilot_responses_no_delete BEFORE DELETE ON pilot_command_responses BEGIN SELECT RAISE(ABORT,'pilot响应只允许追加'); END;`);
+    if (this.shared.ids().some(id => this.get(id).schema_version !== 2)) {
+      this.shared.close();
+      throw new Error('数据库包含旧版pilot会话，不能混用新问卷/反馈流程。请使用独立pilot-1108-r2数据目录，保留旧数据另行导出。');
+    }
     for (const id of this.shared.ids()) {
       const state = this.get(id);
       this.clocks.set(id, { base: this.clock.mono(), offset: state.elapsed_ms });

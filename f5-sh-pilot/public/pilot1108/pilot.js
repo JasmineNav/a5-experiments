@@ -68,18 +68,21 @@ function render() {
     document.querySelector('#compute').onclick = () => go({ type: 'compute' });
   } else if (v.stage === 'compute') {
     const selected = v.answers.qualified.toUpperCase();
-    app.innerHTML = `${prefix}<h2>界面2 · 算费用、选方案</h2><div class="columns"><section class="panel">${table(task)}<button id="requirements" class="secondary">返回任务要求</button></section><section class="panel">${inputFields(v.answers, ['A', 'B', 'C', 'D'])}<fieldset><legend>选择符合要求的方案（可多选）</legend>${['A', 'B', 'C', 'D'].map(f => `<label class="check"><input type="checkbox" value="${f}" ${selected.includes(f) ? 'checked' : ''}>${f}</label>`).join('')}</fieldset><button id="next">下一步</button></section></div>`;
+    app.innerHTML = `${prefix}<h2>界面2 · 算费用、选方案</h2><div class="columns"><section class="panel">${table(task)}<button id="requirements" class="secondary">返回任务要求</button></section><section class="panel">${inputFields(v.answers, ['A', 'B', 'C', 'D'])}<p class="hint">费用请保留两位小数，例如练习题填1.50。</p><fieldset><legend>选择符合要求的方案（可多选）</legend>${['A', 'B', 'C', 'D'].map(f => `<label class="check"><input type="checkbox" value="${f}" ${selected.includes(f) ? 'checked' : ''}>${f}</label>`).join('')}</fieldset><button id="next">下一步</button></section></div>`;
     bindInputs();
     app.querySelectorAll('[type=checkbox]').forEach(input => input.onchange = () => command({ type: 'input', field: 'qualified', value: [...app.querySelectorAll('[type=checkbox]:checked')].map(i => i.value).join('、') }));
     document.querySelector('#requirements').onclick = () => go({ type: 'requirements' });
     document.querySelector('#next').onclick = () => go({ type: 'next' });
   } else if (v.stage === 'transcribe') {
-    app.innerHTML = `${prefix}<h2>界面3 · 照着结果填写并提交</h2><div class="columns"><section class="panel"><h2>刚才的结果</h2><table><thead><tr><th>项目</th><th>结果</th></tr></thead><tbody>${fields.map(f => `<tr><td>${labels[f]}</td><td>${escape(v.source[f])}${f === 'qualified' ? '' : ' 万元'}</td></tr>`).join('')}</tbody></table></section><section class="panel"><h2>确认活动执行方案</h2>${inputFields(v.answers)}<p class="hint">合格方案编号可用顿号分隔，例如 A、D。费用单位为万元。</p>${v.feedback ? '<div id="feedback" class="feedback" aria-label="登记完成反馈"></div>' : ''}<button id="next">提交最终结果</button></section></div>`;
+    app.innerHTML = `${prefix}<h2>界面3 · 照着结果填写并提交</h2><div class="columns"><section class="panel"><h2>刚才的结果</h2><table><thead><tr><th>项目</th><th>结果</th></tr></thead><tbody>${fields.map(f => `<tr><td>${labels[f]}</td><td>${escape(v.source[f])}${f === 'qualified' ? '' : ' 万元'}</td></tr>`).join('')}</tbody></table></section><section class="panel"><h2>确认活动执行方案</h2>${v.feedback ? '<div id="feedback" class="feedback" aria-label="填写进度"></div>' : ''}${inputFields(v.answers)}<p class="hint">合格方案编号可用顿号分隔，例如 A、D。费用单位为万元，请填写两位小数，例如16.97；16.不计为填写完成。</p><button id="next">提交最终结果</button></section></div>`;
     bindInputs(); feedback(); document.querySelector('#next').onclick = () => go({ type: 'next' });
   } else {
-    const phase = v.stage === 'scale1' ? '第一步：算费用、选方案' : '第二步：照着结果填写';
-    app.innerHTML = `${prefix}<h2>阶段量表 · ${phase}</h2><form id="ratings" class="panel scale"><p>请只评价刚刚完成的阶段。</p><p class="hint">心理需求、信息整合需求、努力：1完全没有；2很低；3较低；4中等；5较高；6很高；7极高。<br>放松感：1完全不放松；2只有一点点放松；3有些放松；4中等；5比较放松；6很放松；7极其放松。</p>${v.scale_items.map(item => `<fieldset><legend>${item.label}</legend><p>${item.question}</p><div class="choices">${Array.from({ length: 7 }, (_, i) => `<label><input required type="radio" name="${item.key}" value="${i + 1}">${i + 1}</label>`).join('')}</div></fieldset>`).join('')}<button type="submit">提交量表并继续</button></form>`;
-    document.querySelector('#ratings').onsubmit = event => { event.preventDefault(); go({ type: 'ratings', values: Object.fromEntries([...new FormData(event.currentTarget)].map(([key, value]) => [key, Number(value)])) }); };
+    app.innerHTML = `${prefix}<h2>任务后问卷 · 分别回顾两个阶段</h2><form id="ratings" class="panel scale"><p>计算与誊写已全部完成。请分别回顾两个阶段，各评价四项。</p><p class="hint">心理需求、信息整合需求、努力：1完全没有；2很低；3较低；4中等；5较高；6很高；7极高。<br>放松感：1完全不放松；2只有一点点放松；3有些放松；4中等；5比较放松；6很放松；7极其放松。</p>${v.scale_phases.map(phase => `<section class="phase-ratings"><h2>${phase.label}</h2>${phase.items.map(item => `<fieldset><legend>${item.label}</legend><p>${item.question}</p><div class="choices">${Array.from({ length: 7 }, (_, i) => `<label><input required type="radio" name="${phase.key}.${item.key}" value="${i + 1}">${i + 1}</label>`).join('')}</div></fieldset>`).join('')}</section>`).join('')}<button type="submit">提交两个阶段的评价并继续</button></form>`;
+    document.querySelector('#ratings').onsubmit = event => {
+      event.preventDefault(); const values = { phase1: {}, phase2: {} };
+      for (const [name, value] of new FormData(event.currentTarget)) { const [phase, key] = name.split('.'); values[phase][key] = Number(value); }
+      go({ type: 'ratings', values });
+    };
   }
   window.scrollTo(0, 0);
 }
@@ -95,14 +98,14 @@ async function home() {
   clearError(); save.textContent = ''; current = null;
   try {
     const data = await api('/api/sessions');
-    app.innerHTML = `<div class="setup"><h1>11-08 材料 pilot · 主试设置</h1><p>练习 → 两个不同材料的 SH01 任务。本轮不发送任何打断消息。请先完成设置，再交给被试。</p><form id="create" class="panel"><label class="field">被试编号<input name="participant" type="text" required maxlength="40" pattern="[A-Za-z0-9_\\-]+" placeholder="P01"></label><label class="field">任务顺序<select name="order"><option value="auto">按编号平衡（1、2无反馈先；3、4有反馈先）</option><option value="no-feedback-first">无反馈 → 有反馈</option><option value="feedback-first">有反馈 → 无反馈</option></select></label><label class="field">反馈形式<select name="feedback"><option value="progress">静态分段进度条（推荐）</option><option value="registered">登记结果并标绿</option><option value="message">下方显示已完成文字</option></select></label><label class="field">誊写来源<select name="source"><option value="participant">被试刚才的输入（默认）</option><option value="standard">文档标准答案</option></select></label><p><label class="check"><input name="practiceScales" type="checkbox">练习也填写量表</label><label class="check"><input name="practiceFeedback" type="checkbox">练习也提供反馈</label></p><p class="hint">P01/P02 无反馈先，P03/P04 有反馈先；P05起重复四人分配。允许主试显式覆盖，不强制人数配额。会话创建时固定配置。</p><button type="submit">开始练习</button></form><section class="panel"><h2>已有会话</h2>${data.sessions.map(s => `<div class="session"><span>${escape(s.participant)} · ${escape(s.stage)} · ${escape(s.config.order)}</span><span><button data-resume="${s.id}" class="secondary">${s.stage === 'done' ? '查看完成页' : '恢复'}</button><button data-export="${s.id}" class="secondary">导出</button></span></div>`).join('') || '<p>暂无会话</p>'}</section></div>`;
+    app.innerHTML = `<div class="setup"><h1>11-08 材料 pilot · 主试设置</h1><p>练习 → 两个不同材料的 SH01 任务。本轮不发送任何打断消息。请先完成设置，再交给被试。</p><form id="create" class="panel"><label class="field">被试编号<input name="participant" type="text" required maxlength="40" pattern="[A-Za-z0-9_\\-]+" placeholder="P01"></label><label class="field">任务顺序<select name="order"><option value="auto">按编号平衡（1、2无反馈先；3、4有反馈先）</option><option value="no-feedback-first">无反馈 → 有反馈</option><option value="feedback-first">有反馈 → 无反馈</option></select></label><p>本版固定：誊写被试本人的计算结果；有反馈条件只在界面3显示五节点填写进度；练习无量表、无进度反馈。</p><p class="hint">P01/P02 无反馈先，P03/P04 有反馈先；P05起重复四人分配。允许主试显式覆盖，不强制人数配额。会话创建时固定配置。</p><button type="submit">开始练习</button></form><section class="panel"><h2>已有会话</h2>${data.sessions.map(s => `<div class="session"><span>${escape(s.participant)} · ${escape(s.stage)} · ${escape(s.config.order)}</span><span><button data-resume="${s.id}" class="secondary">${s.stage === 'done' ? '查看完成页' : '恢复'}</button><button data-export="${s.id}" class="secondary">导出</button></span></div>`).join('') || '<p>暂无会话</p>'}</section></div>`;
     const form = document.querySelector('#create');
     for (const [key, value] of Object.entries(data.defaults)) if (form.elements[key]) {
       if (typeof value === 'boolean') form.elements[key].checked = value; else form.elements[key].value = value;
     }
     form.onsubmit = async event => {
       event.preventDefault(); clearError(); const button = form.querySelector('button'); button.disabled = true;
-      const values = new FormData(form); const config = { feedback: values.get('feedback'), source: values.get('source'), practiceScales: values.has('practiceScales'), practiceFeedback: values.has('practiceFeedback') };
+      const values = new FormData(form); const config = {};
       if (values.get('order') !== 'auto') config.order = values.get('order');
       try {
         current = await api('/api/sessions', { method: 'POST', body: JSON.stringify({ participant: values.get('participant'), config }) });

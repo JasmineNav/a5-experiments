@@ -26,7 +26,7 @@ export function createPilotApp(store: PilotStore, defaults: Partial<Config> = {}
         const html = await readFile(fileURLToPath(new URL('../../public/pilot1108/index.html', import.meta.url)), 'utf8');
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(html.replace('__CSRF_TOKEN__', token)); return;
       }
-      if (['/pilot.js', '/feedback.js', '/pilot.css'].includes(path) && req.method === 'GET') {
+      if (['/pilot.js', '/feedback.js', '/rules.js', '/pilot.css'].includes(path) && req.method === 'GET') {
         const name = path.slice(1);
         const body = await readFile(fileURLToPath(new URL(`../../public/pilot1108/${name}`, import.meta.url)));
         res.writeHead(200, { 'Content-Type': name.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/css; charset=utf-8' }); res.end(body); return;
