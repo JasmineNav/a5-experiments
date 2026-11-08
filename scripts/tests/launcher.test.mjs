@@ -12,11 +12,11 @@ import { discoverExperiments, getStatus, startExperiment, stopExperiment, readLo
 import { localDeviceControl, runDeviceControl } from '../local-device-launch.mjs';
 
 const execute = promisify(execFile);
-test('本机设备配置接入公共菜单；缺控制脚本或设备启动失败时不能回退 Mock', async () => {
+test('首次无配置也进入真机 Web 整备；缺脚本或启动失败不能回退 Mock', async () => {
   const root = await mkdtemp(join(tmpdir(), 'a5 真机入口 '));
   try {
     const item = { name: 'f5-sh-pilot' }, options = { root, platform: 'win32' };
-    assert.equal(await localDeviceControl(item, options), null);
+    await assert.rejects(localDeviceControl(item, options), /未启动 Mock/);
     await mkdir(join(root, '.a5-local'));
     await writeFile(join(root, '.a5-local/device.json'), '{}');
     await assert.rejects(localDeviceControl(item, options), /未启动 Mock/);

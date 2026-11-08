@@ -240,6 +240,13 @@ function renderDeviceControl() {
   const voiceState = { pending: '等待检查', protected: '已限制', restored: '已恢复原设置', error: '限制失败' };
   setText($('#device-host-state'), !supported ? '当前为 Mock 预演，真机控制不可用。' : `上位机守护：${control.enabled ? '已开启' : '已关闭'} · 语音助手悬浮窗：${voiceState[control.voice_guard?.state] ?? '等待检查'} · 显示应用：${control.package_name}${control.scrcpy?.running ? ' · scrcpy 已打开' : ''}`);
   setText($('#device-control-error'), control?.error ?? control?.voice_guard?.error ?? control?.scrcpy?.error ?? '');
+  for(const id of ['device-list','device-bind','device-connect','device-wireless','device-doctor'])$(`#${id}`).disabled=!supported||blocked;
+  const route=control?.route||'未选择',link=control?.link;
+  setText($('#device-route-status'),`路由：${route} · 身份：${adapter?.device_id??'未读取'}（${control?.identity_mode??'adb'}） · Wi-Fi 锁：${adapter?.wifi_lock??'未请求'}${link?.next_retry_in_ms!=null?' · 无线重连 '+Math.ceil(link.next_retry_in_ms/1000)+' 秒后':''}${control?.host_retry_in_ms!=null?' · 应用重试 '+Math.ceil(control.host_retry_in_ms/1000)+' 秒后':''}${control?.host_stall?' · 停止原因：'+control.host_stall.reason+' '+control.host_stall.hint:''}`);
+  renderOnce($('#device-doctor-results'),control?.doctor,()=> (control?.doctor?.checks??[]).map(c=>el('p',{text:`${c.status.toUpperCase()} · ${c.label}：${c.detail}${c.next?' → '+c.next:''}`})));
+  setText($('#device-clock'),(control?.clock_samples??[]).map(s=>`设备 uptime ${s.device_monotonic_ms} ms · RTT ${s.rtt_ms.toFixed(1)} ms · ${s.clock_id}`).join('；')||'设备时钟：自检时采样（本次不做跨设备校准）');
+  const completed=[!!control?.route,!!adapter?.connected,!!adapter?.ready,control?.debug_notifications?.some(r=>r.events?.some(e=>e.kind==='drawn'))];
+  [...$('#device-steps').children].forEach((li,i)=>{li.dataset.complete=String(completed[i]);li.textContent=(completed[i]?'✓ ':'')+['选设备','连通道','打开显示端','试发验证'][i];});
   const records = control?.debug_notifications ?? [];
   const latest = records[0];
   setText($('#device-debug-result'), latest ? `最近手动通知：${DEBUG_STATUS[latest.status] ?? latest.status}${latest.error ? ' · ' + latest.error : ''}` : '尚未手动发送通知。');
@@ -261,6 +268,14 @@ async function deviceAction(input) {
   try { const result = await api('device/control', input); await loadDeviceControl(); return result; }
   finally { deviceWorking = false; renderDeviceControl(); }
 }
+async function prepAction(path,input={}){
+  deviceWorking=true;renderDeviceControl();try{const result=await api('device/'+path,input);await loadDeviceControl();return result;}finally{deviceWorking=false;renderDeviceControl();}
+}
+$('#device-list').addEventListener('click',async()=>{try{const r=await api('device/list');$('#device-select').replaceChildren(...r.devices.map(d=>new Option(`${d.serial} · ${d.transport} · ${d.state}`,d.serial)));}catch(e){fail(e);}});
+$('#device-bind').addEventListener('click',async()=>{try{await prepAction('config',{serial:$('#device-select').value,identity:$('#device-identity').value});}catch(e){fail(e);}});
+$('#device-connect').addEventListener('click',async()=>{try{await prepAction('connect',{address:$('#device-ip').value});}catch(e){fail(e);}});
+$('#device-wireless').addEventListener('click',async()=>{try{await prepAction('enable-wireless',{serial:$('#device-select').value||undefined});feedback('无线通道已绑定，可拔下 USB。');}catch(e){fail(e);}});
+$('#device-doctor').addEventListener('click',async()=>{try{await prepAction('doctor');}catch(e){fail(e);}});
 for (const [id, action] of [['device-open', 'open'], ['device-probe', 'probe'], ['device-reconnect', 'reconnect'], ['device-scrcpy', 'scrcpy']]) {
   $(`#${id}`).addEventListener('click', async () => {
     try { await deviceAction({ action }); feedback(action === 'scrcpy' ? '已请求打开眼镜左眼画面。' : '设备控制已执行，请查看最新状态。'); }

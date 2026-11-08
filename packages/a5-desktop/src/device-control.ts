@@ -1,3 +1,4 @@
+import {Backoff,RouteMemory,WirelessSupervisor,adbTransport,listDevices,parseAddress,resolveDeviceIdentity,connectRoute,enableWireless,runDoctor,diagnoseFocus,type DoctorReport} from '@lab/glasses-display';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -18,7 +19,7 @@ interface DebugRecord {
 /** 协调上位机恢复、独立通知与权限守护，不重放实验刺激。 */
 export class DeviceControl {
   private readonly engine: Engine;
-  private readonly serial: string;
+  private serial: string;
   private readonly adb: string;
   private readonly packageName: string;
   private readonly run: Runner;
@@ -35,32 +36,48 @@ export class DeviceControl {
   private closed = false;
   private lastAttempt = -Infinity;
   private task?: Promise<unknown>;
+  private identity:'adb'|'hardware';
+  private hardwareId?:string;
+  private readonly routes:RouteMemory;
+  private readonly link:WirelessSupervisor;
+  private readonly hostBackoff=new Backoff({baseMs:10000,maxMs:20000,maxAttempts:3});
+  private hostStall:{reason:string;hint:string;attempts:number}|null=null;
+  private startupRecalled=false;
+  private lastDoctor:DoctorReport|null=null;
+  private clockSamples:{device_monotonic_ms:number;clock_id:string;rtt_ms:number}[]=[];
   private readonly voiceGuard: VoiceOverlayGuard;
   private diagnostics: { last_action: string | null; last_at: string | null; error: string | null } = { last_action: null, last_at: null, error: null };
 
   /** 绑定设备、ADB 执行器和持久化记录；重启后的在途通知只标为待核查。 */
-  constructor(engine: Engine, options: { serial?: string; adb?: string; packageName?: string; enabled?: boolean; run?: Runner; clock?: Clock; now?: () => number; scrcpy?: string; wait?: (ms: number) => Promise<void> } = {}) {
+  constructor(engine: Engine, options: { serial?: string; adb?: string; packageName?: string; enabled?: boolean; run?: Runner; clock?: Clock; now?: () => number; scrcpy?: string; wait?: (ms: number) => Promise<void>; identity?:'adb'|'hardware' } = {}) {
     this.engine = engine; this.serial = options.serial ?? ''; this.adb = options.adb ?? 'adb';
-    this.packageName = options.packageName ?? 'link.ironip.a5.rayneo';
+    this.packageName = options.packageName ?? 'link.ironip.glasses.display';
+    this.identity=options.identity??'adb';
     if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(this.packageName)) throw new Error('A5_RAYNEO_PACKAGE 包名无效。');
     this.run = options.run ?? (async (file, args) => (await execute(file, args, { windowsHide: true, timeout: 5000, maxBuffer: 1024 * 1024 })).stdout);
     // 优先用注入的 clock；旧参数 now 仅作兼容，同时充当墙钟与单调钟（测试用假时钟）。
     const clock: Clock = options.clock ?? (options.now ? { wall: options.now, mono: options.now } : engine.clock);
     this.now = clock.wall; this.mono = clock.mono;
+    this.routes=new RouteMemory({get:key=>engine.store.setting(key),set:(key,value)=>engine.store.setSetting(key,value)},{now:()=>new Date(this.now())});
+    const epochOffset=this.now()-this.mono();
+    this.link=new WirelessSupervisor({run:this.run,adb:this.adb,now:()=>this.mono()+epochOffset,sleep:options.wait??delay,audit:(action,detail)=>this.audit(action,detail)});
     this.scrcpy = options.scrcpy ?? 'scrcpy';
     this.wait = options.wait ?? delay;
     this.voiceGuard = new VoiceOverlayGuard(engine.store, { serial: this.serial, adb: this.adb, run: this.run, clock, audit: (action, detail) => this.audit(action, detail) });
     this.engine.store.db.exec('CREATE TABLE IF NOT EXISTS device_debug_requests(request_id TEXT PRIMARY KEY,data TEXT NOT NULL)');
     const saved = this.engine.store.setting<boolean>('device_host_enabled');
     this.enabled = saved ?? options.enabled ?? true;
+    this.startupRecalled=!engine.adapter.setRoute;
+    this.hardwareId=engine.store.setting<{hardware_id?:string}>('device_route')?.hardware_id;
     for (const record of this.records()) {
       if (record.status === 'sending') { record.status = 'unknown'; record.error = '服务重启，测试通知结果待核查；不会补发。'; this.save(record); }
     }
+    engine.deviceOperationsBusy=()=>this.working||this.closed;
     engine.deviceControlBusy = () => this.working || this.hasLiveDebug();
     engine.deviceDebugEvent = event => this.receive(event);
   }
   /** 只允许真实设备适配器和有效序列号执行主机操作。 */
-  private supported() { return this.engine.adapter.getStatus().source === 'device' && /^[A-Za-z0-9_.:-]{1,128}$/.test(this.serial); }
+  private supported() { return this.engine.adapter.getStatus().source === 'device'; }
   /** 按通知编号保存幂等记录，不写入实验会话。 */
   private save(record: DebugRecord) { this.engine.store.db.prepare('INSERT INTO device_debug_requests VALUES (?,?) ON CONFLICT(request_id) DO UPDATE SET data=excluded.data').run(record.request_id, JSON.stringify(record)); }
   /** 读取最近五十条独立通知，供互斥保护与后台展示使用。 */
@@ -80,6 +97,8 @@ export class DeviceControl {
   /** 返回后台设备控制快照，包括守护诊断、独立通知与审计。 */
   status() {
     return { supported: this.supported(), enabled: this.supported() && this.enabled, working: this.working,
+      route:this.serial,identity_mode:this.identity,hardware_id:this.hardwareId??null,expected_app_version:'2.2.0',link:this.link.status(),remembered_routes:this.routes.all(),
+      host_stall:this.hostStall,host_retry_in_ms:this.hostStall||!this.hostBackoff.attempts?null:Number.isFinite(this.hostBackoff.nextAt)?Math.max(0,this.hostBackoff.nextAt-this.mono()):null,doctor:this.lastDoctor,clock_samples:this.clockSamples,
       package_name: this.packageName, ...this.diagnostics, active_session: this.activeSession(), voice_guard: this.voiceGuard.status(),
       scrcpy: { running: !!this.mirror && this.mirror.exitCode === null, crop: '640:480:0:0', error: this.mirrorError },
       debug_allowed: this.supported() && !this.working && !this.hasLiveDebug() && !this.engine.adapter.getStatus().busy,
@@ -109,7 +128,10 @@ export class DeviceControl {
       if (this.displayProtected()) throw new HttpError(409, '眼镜消息尚未展示结束，暂不能变更系统悬浮窗保护。');
     }
     this.working = true;
-    const work = this.perform(input);
+    const work = (async()=>{await this.engine.settle();
+      if(['open','reconnect'].includes(input.action)){this.hostBackoff.reset();this.hostStall=null;}
+      return this.perform(input);
+    })();
     this.task = work;
     try { return await work; } finally { this.working = false; }
   }
@@ -120,7 +142,7 @@ export class DeviceControl {
       let notification: DebugRecord | undefined;
       if (input.action === 'host') {
         this.enabled = input.enabled!; this.engine.store.setSetting('device_host_enabled', this.enabled);
-        await this.voiceGuard.sync(this.enabled);
+        if(this.serial)await this.voiceGuard.sync(this.enabled);
       }
       else if(input.action==='confirm_notify') {
         const m=this.engine.store.findRequest(input.request_id??'');
@@ -128,8 +150,8 @@ export class DeviceControl {
         else { const record=this.records().find(r=>r.request_id===input.request_id); if(!record || record.display_mode!=='confirm_until_ack' || !record.events.some(e=>e.kind==='drawn')) throw new HttpError(409,'没有可确认的手动通知。'); if(!this.engine.adapter.confirm) throw new HttpError(409,'设备不支持确认。');await this.engine.adapter.confirm({request_id:record.request_id,device_id:record.device_id}); }
       }
       else if (input.action === 'notify') notification = await this.notify(input);
-      else if (input.action === 'scrcpy') await this.openMirror();
-      else if (input.action === 'probe') await this.engine.adapter.probe?.();
+      else if (input.action === 'scrcpy') {if(this.displayProtected())throw new HttpError(409,'眼镜消息尚未展示结束。');await this.openMirror();}
+      else if (input.action === 'probe') {if(this.displayProtected())throw new HttpError(409,'眼镜消息尚未展示结束。');await this.engine.adapter.probe?.();}
       else {
         if (this.displayProtected()) throw new HttpError(409, '眼镜消息尚未展示结束，暂不能重建连接或切换前台。');
         if (input.action === 'reconnect') await this.engine.adapter.reconnect?.();
@@ -140,7 +162,7 @@ export class DeviceControl {
       this.audit(input.action, { ok: true, request_id: notification?.request_id });
       return { notification, adapter: this.engine.adapter.getStatus(), control: this.status() };
     } catch (error) {
-      this.diagnostics.error = (error instanceof Error ? error.message : String(error)).replaceAll(this.serial, '[已绑定设备]');
+      this.diagnostics.error = (error instanceof Error ? error.message : String(error)).replaceAll(this.serial||'\u0000', '[已绑定设备]');
       this.audit(input.action, { ok: false, error: this.diagnostics.error });
       if (error instanceof HttpError) throw error;
       throw new HttpError(503, this.diagnostics.error);
@@ -163,6 +185,7 @@ export class DeviceControl {
   }
   /** 核对 ADB、恢复前台并探测显示端；各异步步骤之间检查关闭状态。 */
   private async recover() {
+    if(!this.serial)throw new Error('请先选设备并连接通道。');
     let state: string;
     try { state = (await this.run(this.adb, ['-s', this.serial, 'get-state'])).trim(); }
     catch { throw new Error('ADB 设备不可用：请检查 USB 数据线及眼镜调试授权。'); }
@@ -173,7 +196,7 @@ export class DeviceControl {
     if (this.closed) return;
     await this.run(this.adb, ['-s', this.serial, 'shell', 'cmd', 'statusbar', 'collapse']).catch(() => {});
     if (this.closed) return;
-    const result = await this.run(this.adb, ['-s', this.serial, 'shell', 'am', 'start', '-n', `${this.packageName}/link.ironip.a5.rayneo.MainActivity`]);
+    const result = await this.run(this.adb, ['-s', this.serial, 'shell', 'am', 'start', '-n', `${this.packageName}/link.ironip.glasses.display.MainActivity`]);
     if (/Error|Exception/.test(result)) throw new Error('无法打开指定眼镜显示程序，请确认 APK 已安装。');
     if (this.closed) return;
     const window = await this.run(this.adb, ['-s', this.serial, 'shell', 'dumpsys', 'window']).catch(() => '');
@@ -228,38 +251,117 @@ export class DeviceControl {
   /** 不依赖数据库审计记录定时任务错误，供同步与异步异常共用。 */
   private reportTickError(error: unknown) {
     this.diagnostics = { last_action: 'tick', last_at: new Date(this.now()).toISOString(),
-      error: (error instanceof Error ? error.message : String(error)).replaceAll(this.serial, '[已绑定设备]') };
+      error: (error instanceof Error ? error.message : String(error)).replaceAll(this.serial||'\u0000', '[已绑定设备]') };
     console.error('设备控制定时任务失败：', this.diagnostics.error);
   }
   /** 按展示保护和限频规则触发权限核对或前台恢复，不重放消息。 */
   private tickGuard() {
-    if (this.closed || !this.supported() || this.working || this.displayProtected()) return;
-    const voiceDue = this.voiceGuard.due(this.enabled);
-    if (!this.enabled && !voiceDue) return;
-    const state = this.engine.adapter.getStatus();
-    if (state.connected && state.ready || !this.enabled) {
-      if (!voiceDue || this.mono() - this.lastAttempt < 5000) return;
-      this.lastAttempt = this.mono(); this.working = true;
-      this.task = this.voiceGuard.sync(this.enabled).catch(error => this.reportTickError(error)).finally(() => { this.working = false; });
-      return;
+    if(this.closed||!this.supported()||this.working||this.displayProtected())return;
+    const s=this.engine.adapter.getStatus();
+    if(s.connected&&s.ready){this.hostBackoff.reset();this.hostStall=null;}
+    if(s.connected&&this.serial&&adbTransport(this.serial)==='wifi_tcpip'){
+      this.link.healthy(this.serial);if(this.hardwareId)this.routes.remember(this.hardwareId,this.serial,s.network??null);
     }
-    if (this.mono() - this.lastAttempt < 5000) return;
-    this.lastAttempt = this.mono();
-    void this.action({ action: 'open' }).catch(() => { /* 具体错误已写入控制诊断与审计，下一次限频恢复。 */ });
+    const needsLink=!s.connected&&adbTransport(this.serial)==='wifi_tcpip';
+    if(!this.startupRecalled||needsLink){
+      this.working=true;
+      this.task=(async()=>{await this.engine.settle();
+        if(!this.startupRecalled){this.startupRecalled=true;await this.recallRoute();}
+        if(this.serial&&adbTransport(this.serial)==='wifi_tcpip'){
+          if(this.engine.adapter.getStatus().connected)this.link.healthy(this.serial);
+          else {const result=await this.link.heal(this.serial,this.hardwareId);if(this.enabled&&['present','connected'].includes(result)&&!this.hostStall&&this.hostBackoff.due(this.mono()))await this.recoverGuarded();}
+        }
+      })().catch(e=>this.reportTickError(e)).finally(()=>{this.working=false;});return;
+    }
+    const voiceDue=this.voiceGuard.due(this.enabled);
+    if(s.connected&&s.ready||!this.enabled){
+      if(!voiceDue||this.mono()-this.lastAttempt<5000)return;
+      this.lastAttempt=this.mono();this.working=true;
+      this.task=(async()=>{await this.engine.settle();await this.voiceGuard.sync(this.enabled);})().catch(e=>this.reportTickError(e)).finally(()=>{this.working=false;});return;
+    }
+    if(!this.serial||this.hostStall||!this.hostBackoff.due(this.mono()))return;
+    this.lastAttempt=this.mono();this.working=true;
+    this.task=(async()=>{await this.engine.settle();
+      if(adbTransport(this.serial)==='wifi_tcpip'){
+        const transport=(await listDevices(this.run,this.adb)).find(d=>d.serial===this.serial);
+        if(transport?.state!=='device')return;
+      }
+      await this.recoverGuarded();
+    })().catch(e=>this.reportTickError(e)).finally(()=>{this.working=false;});
   }
+  private async recoverGuarded(){
+      try{await this.recover();}catch(e){this.diagnostics.error=e instanceof Error?e.message:String(e);}
+      const after=this.engine.adapter.getStatus();
+      if(after.connected&&after.ready){this.hostBackoff.reset();this.hostStall=null;return;}
+      const focus=await diagnoseFocus(this.run,this.adb,this.serial,this.packageName);
+      const next=this.hostBackoff.fail(this.mono());
+      if(focus.kind==='system_dialog'||next===null){this.hostStall={reason:focus.kind==='system_dialog'?'system_dialog':'host_stall',hint:'自动唤醒已停止；处理眼镜遮挡/权限或运行自检后，点击「唤醒并打开」重试。',attempts:this.hostBackoff.attempts};this.audit('host_retry_stopped',this.hostStall);}
+  }
+  private async exclusive<T>(work:()=>Promise<T>){
+    if(this.closed||this.working)throw new HttpError(409,'眼镜控制正在执行或关闭。');
+    if(!this.supported())throw new HttpError(409,'Mock 模式不执行真机整备。');
+    if(this.displayProtected())throw new HttpError(409,'眼镜消息尚未展示结束，不能交错执行设备操作。');
+    this.working=true;const task=(async()=>{await this.engine.settle();return work();})();this.task=task;
+    try{return await task;}finally{this.working=false;}
+  }
+  private requireMutable(){if(this.activeSession()||this.displayProtected())throw new HttpError(409,'存在进行中会话或眼镜展示，不能切换路由。');}
+  async devices(){return listDevices(this.run,this.adb);}
+  async configure(input:{serial:string;identity?:'adb'|'hardware'}){return this.exclusive(()=>this.bind(input.serial,input.identity));}
+  private async bind(serial:string,identity=this.identity){
+    this.requireMutable();if(typeof serial!=='string'||!/^[A-Za-z0-9_.:\[\]-]{1,128}$/.test(serial)||!['adb','hardware'].includes(identity))throw new HttpError(422,'设备路由或身份模式无效。');
+    if(!this.engine.adapter.setRoute)throw new HttpError(409,'适配器不支持路由配置。');
+    const hardware=await resolveDeviceIdentity(this.run,this.adb,serial);
+    const prior=this.serial;
+    if(this.identity==='hardware'&&identity==='hardware'&&this.engine.adapter.getStatus().device_id&&this.engine.adapter.getStatus().device_id!==hardware.device_id)throw new HttpError(409,'固定硬件身份与所选路由不一致。');
+    if(prior&&prior!==serial&&this.voiceGuard.hasBackup()){
+      const before=this.hardwareId??(await resolveDeviceIdentity(this.run,this.adb,prior).catch(()=>null))?.device_id;
+      if(before===hardware.device_id)VoiceOverlayGuard.moveBackup(this.engine.store,prior,serial);
+      else {await this.voiceGuard.sync(false);if(this.voiceGuard.hasBackup())throw new HttpError(409,'原设备权限尚未恢复，不能切换到另一副眼镜。');}
+    }
+    await this.engine.adapter.setRoute(serial,identity);
+    this.serial=serial;this.identity=identity;this.hardwareId=hardware.device_id;this.voiceGuard.rebind(serial);this.mirror?.kill();this.mirror=undefined;
+    this.engine.store.setSetting('device_route',{serial,identity,hardware_id:hardware.device_id});
+    this.routes.remember(hardware.device_id,serial,this.engine.adapter.getStatus().network??null);
+    this.link.reset();this.hostBackoff.reset();this.hostStall=null;this.audit('configure',{route:serial,identity,device_id:this.engine.adapter.getStatus().device_id});return this.status();
+  }
+  async connectWireless(address:string){return this.exclusive(async()=>{
+    this.requireMutable();const route=parseAddress(address);if(!route)throw new HttpError(422,'请输入有效 IPv4 地址或 IP:端口。');
+    const entry=(await this.devices()).find(d=>d.serial===route);
+    const result=await connectRoute(this.run,this.adb,route,{resetFirst:!!entry&&entry.state!=='device',restartOnNoRoute:true});
+    if(!result.ok)throw new HttpError(503,`无线连接失败：${result.failure} ${result.output}`);
+    await this.bind(route);return {control:this.status(),connected_route:route};
+  });}
+  async enableWirelessFromUsb(serial?:string){return this.exclusive(async()=>{
+    this.requireMutable();const usb=(await this.devices()).filter(d=>d.transport==='usb'&&d.state==='device'&&(!serial||serial===d.serial));
+    if(usb.length!==1)throw new HttpError(409,'请插好并选择唯一已授权 USB 眼镜。');
+    const usbIdentity=await resolveDeviceIdentity(this.run,this.adb,usb[0]!.serial);
+    if(this.serial===usb[0]!.serial)this.hardwareId=usbIdentity.device_id;
+    const result=await enableWireless({run:this.run,adb:this.adb,sleep:this.wait},usb[0]!.serial);await this.bind(result.route);
+    this.routes.remember(result.device_id??usbIdentity.device_id,result.route,result.network);
+    return {control:this.status(),connected_route:result.route,unplug:true};
+  });}
+  private async recallRoute(){
+    if(!this.engine.adapter.setRoute||this.activeSession())return;
+    const saved=this.engine.store.setting<{serial:string;identity:'adb'|'hardware';hardware_id:string}>('device_route');
+    if(saved?.serial===this.serial){this.hardwareId=saved.hardware_id;return;}
+    if(this.serial&&(await this.devices()).some(d=>d.serial===this.serial&&d.state==='device'))return;
+    const remembered=this.routes.last(),route=saved?.serial??remembered?.route;if(!route)return;
+    if(adbTransport(route)==='wifi_tcpip'){const result=await connectRoute(this.run,this.adb,route,{resetFirst:true,expectedDeviceId:saved?.hardware_id??remembered?.device_id});if(!result.ok)return;}
+    await this.bind(route,saved?.identity??this.identity);this.audit('route_recall',{route});
+  }
+  async doctor(){return this.exclusive(async()=>{
+    const report=await runDoctor({run:this.run,adb:this.adb,scrcpy:this.scrcpy,route:this.serial||undefined,packageName:this.packageName,expectedVersion:'2.2.0',expectedDeviceId:this.hardwareId,env:{adb:'A5_ADB_PATH',scrcpy:'A5_SCRCPY_PATH'}});
+    await this.engine.adapter.probe?.();const s=this.engine.adapter.getStatus();
+    report.checks.push({id:'display_channel',label:'显示端通道',status:s.connected&&s.ready?'ok':'fail',detail:s.error??s.device_info?.app_version??'未就绪',next:s.connected&&s.ready?null:'先连接通道，再打开显示端'});
+    this.clockSamples=[];if(s.connected&&this.engine.adapter.clockSample)for(let i=0;i<3;i++){const start=this.mono();const sample=await this.engine.adapter.clockSample();this.clockSamples.push({...sample,rtt_ms:this.mono()-start});}
+    if(report.checks.some(c=>c.status==='fail'))report.conclusion='fail';this.lastDoctor=report;return {...report,clock_samples:this.clockSamples};
+  });}
   /** 退出时最多等待十五秒回收展示结束证据，安全后恢复原权限；故障时保留备份。 */
   async close() {
-    this.closed = true; await this.task?.catch(() => {}); this.mirror?.kill();
-    if (!this.supported() || !this.voiceGuard.hasBackup()) return;
-    // 服务定时器已停止，只回收设备状态和事件，不推进实验或重发刺激。
-    for (let waited = 0; this.displayProtected() && waited < 15000; waited += 250) {
-      this.engine.pollDevice();
-      await this.wait(250);
-    }
-    if (this.displayProtected()) {
-      this.audit('voice_overlay_restore_deferred', { ok: false, error: '关闭等待展示结束超时，原权限备份已保留。' });
-      return;
-    }
-    await this.voiceGuard.sync(false);
+    this.closed=true;await this.task?.catch(()=>{});await this.engine.settle();this.mirror?.kill();
+    if(!this.supported())return;
+    for(let waited=0;this.displayProtected()&&waited<15000;waited+=250){await this.engine.adapter.pollEvents?.(e=>this.engine.receiveDeviceEvent(e)).catch(()=>{});await this.wait(250);}
+    if(this.displayProtected()){this.audit('voice_overlay_restore_deferred',{ok:false,error:'关闭等待展示结束超时，原权限备份已保留。'});await this.engine.adapter.close?.();return;}
+    if(this.serial){await this.voiceGuard.sync(false);await this.engine.adapter.close?.();await this.run(this.adb,['-s',this.serial,'shell','am','force-stop',this.packageName]).catch(e=>this.audit('display_close_failed',{error:String(e)}));}
   }
 }

@@ -67,6 +67,14 @@ export function createApp(engine: Engine, exportRoot: string, deviceControl?: De
           if (!deviceControl) throw new HttpError(409, '当前服务未配置眼镜控制。');
           json(response, await deviceControl.action(await body(request))); return;
         }
+        if (path.startsWith('/api/admin/device/')) {
+          if(!deviceControl)throw new HttpError(409,'当前服务未配置眼镜控制。');
+          if(method==='GET'&&path==='/api/admin/device/list'){json(response,{devices:await deviceControl.devices()});return;}
+          if(method==='POST'&&path==='/api/admin/device/config'){json(response,await deviceControl.configure(await body(request)));return;}
+          if(method==='POST'&&path==='/api/admin/device/connect'){const input=await body(request);json(response,await deviceControl.connectWireless(input.address));return;}
+          if(method==='POST'&&path==='/api/admin/device/enable-wireless'){const input=await body(request);json(response,await deviceControl.enableWirelessFromUsb(input.serial));return;}
+          if(method==='POST'&&path==='/api/admin/device/doctor'){await body(request);json(response,await deviceControl.doctor());return;}
+        }
         if (method === 'GET' && path === '/api/admin/config') { json(response, { files: await configFiles.list(), selected_file: engine.store.setting('selected_config_file') ?? null, config: engine.config(), debug_participant: engine.debugParticipant(), adapter: engine.adapter.getStatus(), interview_prompts: engine.material.content.interview_prompts }); return; }
         if (method === 'POST' && path === '/api/admin/config') {
           const input = await body(request); const saved = await configFiles.save(input.config ?? input, input.filename);

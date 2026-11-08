@@ -1,3 +1,4 @@
+import type {Capabilities,Tone} from '@lab/glasses-display';
 // 眼镜通信契约：消息请求、回执、设备事件与适配器接口。各实验分项（静态桌面、动态行走等）共用。
 export type DisplayMode = 'legacy_8500' | 'tone_8500' | 'confirm_until_ack';
 
@@ -41,18 +42,22 @@ export interface GlassesEvent {
   display_mode?: DisplayMode;
   duration_ms?: number;
   hide_reason?: string | null;
+  tone?:Tone|null; tone_start_monotonic_ms?:number|null;
 }
 export interface GlassesStatus {
   source: 'mock' | 'device'; connected: boolean;
   device_id?: string; ready?: boolean; busy?: boolean; error?: string | null;
   protocol?: string; independent_duration?: boolean; persistent_deduplication?: boolean;
   display_evidence?: string; device_info?: Record<string, string>;
+  capabilities?:Capabilities; route?:string; transport?:string; identity_source?:string; wifi_lock?:string; network?:string|null;
 }
 export interface GlassesAdapter {
   /** 读取连接与忙碌状态的快照，不触发设备操作。 */
   getStatus(): GlassesStatus;
   /** 探测显示端；调用方需读取状态确认是否连接成功。 */
   probe?(): Promise<void>;
+  setRoute?(serial:string,identity?:'adb'|'hardware'):Promise<void>;
+  clockSample?():Promise<{device_monotonic_ms:number;clock_id:string}>;
   /** 设备空闲时重建传输连接；完成后仍需检查连接状态。 */
   reconnect?(): Promise<void>;
   /** 回收原请求的设备事件，不重发消息。 */

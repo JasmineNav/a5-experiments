@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "A5 眼镜通信公共包：契约、Mock/雷鸟适配器与 Android 显示端（rayneo-display）",
+  "description": "A5 眼镜通信：契约、Mock 与共享显示端实验适配器（旧 Android 目录仅留作历史来源）",
   "engines": {
     "node": ">=24"
   },

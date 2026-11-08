@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { unzipSync, strFromU8 } from 'fflate';
+import {displayPayload} from '@a5/glasses/adapters/shared-glasses.ts';
 import { RayNeoGlassesAdapter, rayneoProtocol } from '@a5/glasses/adapters/rayneo-glasses.ts';
 import type { GlassesEvent, GlassesRequest, ParticipantConfig, GlassesAdapter } from '@a5/desktop/contracts.ts';
 import { Engine } from '@a5/desktop/engine.ts';
@@ -17,7 +18,7 @@ import { testConfig } from './fixtures.ts';
 import { exportData } from '@a5/desktop/export.ts';
 
 // 使用真实 TCP 帧测试电脑协议；此服务不替代 Android 或光学验收。
-async function bridge() {
+async function bridge(identity:'adb'|'hardware'='adb') {
   const requests = new Map<string, GlassesRequest>(), events: { seq: number; event: GlassesEvent }[] = [];
   const commands: string[] = [], adbCalls: string[][] = [], sockets = new Set<Socket>();
   let corruptHash = false, replyIdMismatch = false, rejectShows = false, hold = false;
@@ -31,9 +32,9 @@ async function bridge() {
       while ((end = buffer.indexOf('\n')) >= 0) {
         const req = JSON.parse(buffer.slice(0, end)); buffer = buffer.slice(end + 1); commands.push(req.command);
         let value: Record<string, unknown> = {};
-        if (req.command === 'status') value = { ready: true, busy: false, ledger_id: 'test-ledger', device_info: { fixed_duration_ms: '8500,11000' } };
+        if (req.command === 'status') value = { ready: true, busy: false, ledger_id: 'test-ledger', capabilities:{commands:['show_text','confirm','cancel'],display_modes:['timed','confirm_until_ack'],text_duration_ms:{min:1000,max:60000},tone:true,tone_presets:['notification']}, device_info: { fixed_duration_ms: '8500,11000' } };
         else if (req.command === 'events') value = { ledger_id: 'test-ledger', events: events.filter(e => e.seq > req.payload.after) };
-        else if (req.command === 'show') {
+        else if (req.command === 'show_text') {
           const request = req.payload as GlassesRequest;
           const previous = requests.get(request.request_id);
           if (rejectShows) value = { ok: false, error: 'device_text_does_not_fit' };
@@ -45,16 +46,16 @@ async function bridge() {
           // 将 UTF-8 字节拆开，检查解码器能处理跨 TCP 分片。
           socket.write(frame.subarray(0, 13)); socket.write(frame.subarray(13));
         };
-        if (req.command === 'show' && hold) held.push(reply); else reply();
+        if (req.command === 'show_text' && hold) held.push(reply); else reply();
       }
     });
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as { port: number }).port;
-  const run = async (_file: string, args: string[]) => { adbCalls.push(args); return args.includes('tcp:0') ? `${port}\n` : ''; };
-  const adapter = new RayNeoGlassesAdapter('test-usb', { run }); await adapter.probe();
+  const run = async (_file: string, args: string[]) => { adbCalls.push(args); return args.includes('tcp:0') ? `${port}\n` : args.includes('getprop')?'HW123456':''; };
+  const adapter = new RayNeoGlassesAdapter('test-usb', { run,identity }); await adapter.probe();
   const emit = (request: GlassesRequest, kind: GlassesEvent['kind'], extra: Partial<GlassesEvent> = {}) => {
-    const event: GlassesEvent = { event_id: randomUUID(), request_id: request.request_id, device_id: 'adb:test-usb', kind,
+    const event: GlassesEvent = { event_id: randomUUID(), request_id: request.request_id, device_id:identity==='hardware'?'glasses:HW123456':'adb:test-usb', kind,
       device_wall_ms: 1000, device_monotonic_ms: events.length * 100 + 20, clock_id: 'android_uptime_ms:boot-2', error: null, ...extra };
     events.push({ seq: events.length + 1, event }); return event;
   };
@@ -75,7 +76,7 @@ test('USB协议原样传输两种固定策略的11000ms及设备隐藏原因，�
       const req: GlassesRequest = { ...request(), duration_ms: 11000, display_mode };
       assert.equal((await b.adapter.send(req)).status, 'accepted');
       assert.equal(b.requests.get(req.request_id)!.duration_ms, 11000);
-      assert.equal(b.requests.get(req.request_id)!.display_mode, display_mode);
+      assert.equal(b.requests.get(req.request_id)!.display_mode, 'timed');
       const drawn = b.emit(req, 'drawn', { device_wall_ms: 9000, device_monotonic_ms: 4000 });
       const hidden = b.emit(req, 'hidden', { device_wall_ms: 20016, device_monotonic_ms: 15016, hide_reason: 'auto_timeout', display_mode, duration_ms: 11000 });
       const events: GlassesEvent[] = [];
@@ -104,15 +105,15 @@ test('USB协议：中文换行原样传输、接受不等于绘制、永久幂�
   try {
     const r = request(), receipt = await b.adapter.send(r);
     assert.equal(receipt.status, 'accepted'); assert.equal(receipt.t_display, null); assert.equal(receipt.t_hide, null);
-    assert.deepEqual(b.requests.get(r.request_id), r); assert.equal(b.adbCalls.length, 1);
+    assert.deepEqual(b.requests.get(r.request_id), displayPayload(r)); assert.equal(b.adbCalls.length, 1);
     assert.equal((await b.adapter.send(r)).status, 'accepted'); assert.equal(b.requests.size, 1);
     assert.equal((await b.adapter.send({ ...r, text: '不同正文' })).error, 'request_id_content_conflict');
     b.emit(r, 'drawn'); b.emit(r, 'hidden'); const received: GlassesEvent[] = [];
     await b.adapter.pollEvents(e => received.push(e)); await b.adapter.pollEvents(e => received.push(e));
     assert.equal(received.length, 2); assert.equal(b.adbCalls.length, 1);
     await assert.rejects(b.adapter.send({ ...r, device_id: 'adb:other' }), /binding_mismatch/);
-    assert.ok(b.commands.every(c => ['show', 'status', 'events'].includes(c)));
-    assert.ok(b.adbCalls[0].includes('localabstract:a5-rayneo-v1')); assert.deepEqual(b.adbCalls[0].slice(0, 2), ['-s', 'test-usb']);
+    assert.ok(b.commands.every(c => ['show_text', 'status', 'events'].includes(c)));
+    assert.ok(b.adbCalls[0].includes('localabstract:glasses-display-v2')); assert.deepEqual(b.adbCalls[0].slice(0, 2), ['-s', 'test-usb']);
   } finally { await b.close(); }
 });
 
@@ -121,12 +122,12 @@ test('协议异常、容量拒绝和断线都显式留错；重连仅回收事�
   try {
     b.mismatch(); const r = request(); assert.equal((await b.adapter.send(r)).error, 'device_request_id_mismatch');
     b.reject(); const rejected = await b.adapter.send(request()); assert.equal(rejected.error, 'device_text_does_not_fit'); assert.equal(rejected.status, 'failed');
-    const shows = b.commands.filter(c => c === 'show').length;
+    const shows = b.commands.filter(c => c === 'show_text').length;
     b.disconnect(); await until(() => !b.adapter.getStatus().connected);
     assert.equal((await b.adapter.send(request())).status, 'unacknowledged');
     await b.adapter.pollEvents(() => {});
     assert.equal(b.adapter.getStatus().connected, true);
-    assert.equal(b.commands.filter(c => c === 'show').length, shows);
+    assert.equal(b.commands.filter(c => c === 'show_text').length, shows);
     assert.throws(() => new RayNeoGlassesAdapter('bad serial'), /SERIAL/);
   } finally { await b.close(); }
 });
@@ -193,7 +194,7 @@ test('已删除会话未决发送重启也标未知；重读历史事件可恢�
     try { await restored.pollEvents(e => engine.receiveDeviceEvent(e)); assert.equal(f.store.events(f.created.session_id).length, eventCount); }
     finally { await restored.close(); }
     assert.equal(f.store.interventions(f.created.session_id)[0].status, 'accepted');
-    assert.equal(b.commands.filter(c => c === 'show').length, 1);
+    assert.equal(b.commands.filter(c => c === 'show_text').length, 1);
   } finally { await f.engine.settle(); f.store.close(); await b.close(); }
 });
 
@@ -227,10 +228,10 @@ test('真实RPC在3秒内结束等待，超时不重发，迟到应答不改变�
   try {
     b.hold(); const r = request(), receipt = await b.adapter.send(r);
     assert.equal(receipt.status, 'unacknowledged'); assert.equal(receipt.error, 'device_reply_timeout_delivery_unknown');
-    assert.equal(b.commands.filter(c => c === 'show').length, 1);
+    assert.equal(b.commands.filter(c => c === 'show_text').length, 1);
     b.release(); b.emit(r, 'drawn'); b.emit(r, 'hidden');
     const evidence: GlassesEvent[] = []; await b.adapter.pollEvents(e => evidence.push(e));
-    assert.equal(evidence.length, 2); assert.equal(b.commands.filter(c => c === 'show').length, 1);
+    assert.equal(evidence.length, 2); assert.equal(b.commands.filter(c => c === 'show_text').length, 1);
   } finally { b.release(); await b.close(); }
 });
 
@@ -245,4 +246,15 @@ test('正文哈希不一致为明确故障，保留错误应答，后来的绘�
     b.emit(r, 'drawn'); b.emit(r, 'hidden'); await b.adapter.pollEvents(e => f.engine.receiveDeviceEvent(e));
     assert.equal(f.store.interventions(f.created.session_id)[0].status, 'failed');
   } finally { await f.engine.settle(); f.store.close(); await b.close(); }
+});
+
+test('共享客户端切换同硬件路由保留事件游标，其他 identity 事件跳过但前移游标',async()=>{
+ const b=await bridge('hardware');try{
+   const req={...request(),device_id:'glasses:HW123456'};assert.equal((await b.adapter.send(req)).status,'accepted');
+   const first=b.emit(req,'drawn');const received:GlassesEvent[]=[];await b.adapter.pollEvents(e=>received.push(e));
+   await b.adapter.setRoute('192.168.1.9:5555','hardware');
+   b.emit(req,'accepted',{device_id:'adb:some-other-route'});const hidden=b.emit(req,'hidden');
+   await b.adapter.pollEvents(e=>received.push(e));await b.adapter.pollEvents(e=>received.push(e));
+   assert.deepEqual(received,[first,hidden]);assert.equal(b.adapter.getStatus().device_id,'glasses:HW123456');assert.equal(b.commands.filter(c=>c==='show_text').length,1);
+ }finally{await b.close();}
 });

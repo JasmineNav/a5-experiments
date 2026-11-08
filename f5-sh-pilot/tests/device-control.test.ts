@@ -88,15 +88,15 @@ test('上位机守护限频恢复并固定目标应用，可关闭；不重放�
   try {
     f.ready(false); f.control.tick(); await new Promise<void>(resolve => setImmediate(resolve));
     assert.ok(f.calls.some(args => args.includes('KEYCODE_WAKEUP')));
-    assert.ok(f.calls.some(args => args.includes('link.ironip.a5.rayneo.localfix/link.ironip.a5.rayneo.MainActivity')));
+    assert.ok(f.calls.some(args => args.includes('link.ironip.a5.rayneo.localfix/link.ironip.glasses.display.MainActivity')));
     const initial = f.calls.length;
     f.control.tick(); await new Promise<void>(resolve => setImmediate(resolve));
     assert.equal(f.calls.length, initial);
-    f.advance(5001); f.control.tick(); await new Promise<void>(resolve => setImmediate(resolve));
+    f.advance(10001); f.control.tick(); await new Promise<void>(resolve => setImmediate(resolve));
     // 第二次无需重复设置已经受限的权限，但仍核对并恢复前台。
     assert.equal(f.calls.filter(args => args.includes('KEYCODE_WAKEUP')).length, 2);
     await f.control.action({ action: 'host', enabled: false });
-    f.advance(5001); f.control.tick(); await new Promise<void>(resolve => setImmediate(resolve));
+    f.advance(10001); f.control.tick(); await new Promise<void>(resolve => setImmediate(resolve));
     assert.equal(f.calls.filter(args => args.includes('KEYCODE_WAKEUP')).length, 2);
     await f.control.close();
     const next = new DeviceControl(f.engine, { serial: 'fixture', enabled: false, run: async () => { throw new Error('不应执行'); } });

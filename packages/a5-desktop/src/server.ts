@@ -5,7 +5,7 @@ import { Store } from './store.ts';
 import { Engine } from './engine.ts';
 import { createApp } from './app.ts';
 import { loadMaterial } from './tasks.ts';
-import { RayNeoGlassesAdapter } from '@a5/glasses/adapters/rayneo-glasses.ts';
+import {SharedGlassesAdapter} from '@a5/glasses/adapters/shared-glasses.ts';
 import { MockGlassesAdapter } from '@a5/glasses/adapters/mock-glasses.ts';
 import { DeviceControl } from './device-control.ts';
 import { preflight } from './preflight.ts';
@@ -20,11 +20,14 @@ const runtime = resolve(process.env.A5_RUNTIME_DIR ?? join(experimentRoot, 'runt
 await mkdir(runtime, { recursive: true });
 const store = new Store(join(runtime, 'experiment.sqlite'));
 const mode = process.env.A5_GLASSES_MODE ?? 'mock';
-if (!['mock', 'rayneo'].includes(mode)) throw new Error('A5_GLASSES_MODE 只能是 mock 或 rayneo。');
-const adapter: GlassesAdapter = mode === 'rayneo' ? new RayNeoGlassesAdapter(process.env.A5_RAYNEO_SERIAL ?? '', { adb: process.env.A5_ADB_PATH }) : new MockGlassesAdapter();
+if (!['mock','device','rayneo'].includes(mode))throw new Error('A5_GLASSES_MODE 只能是 mock 或 device（兼容旧值）。');
+const remembered=store.setting<{serial:string;identity:'adb'|'hardware'}>('device_route');
+const serial=remembered?.serial??process.env.A5_GLASSES_SERIAL??process.env.A5_RAYNEO_SERIAL??'';
+const identity=remembered?.identity??(process.env.A5_DEVICE_IDENTITY==='hardware'?'hardware':'adb');
+const adapter:GlassesAdapter=mode==='mock'?new MockGlassesAdapter():new SharedGlassesAdapter(serial,{adb:process.env.A5_ADB_PATH,identity});
 const engine = new Engine(store, adapter, await loadMaterial(), await readJson<ParticipantConfig>('config/participants.pilot.json'));
-const deviceControl = new DeviceControl(engine, { serial: process.env.A5_RAYNEO_SERIAL, adb: process.env.A5_ADB_PATH,
-  packageName: process.env.A5_RAYNEO_PACKAGE, enabled: process.env.A5_RAYNEO_HOST_MODE !== 'off', scrcpy: process.env.A5_SCRCPY_PATH });
+const deviceControl = new DeviceControl(engine, { serial,identity, adb: process.env.A5_ADB_PATH,
+  packageName:process.env.A5_GLASSES_PACKAGE, enabled: process.env.A5_RAYNEO_HOST_MODE !== 'off', scrcpy: process.env.A5_SCRCPY_PATH });
 const server = createApp(engine, resolve(process.env.A5_EXPORT_DIR ?? join(experimentRoot, 'exports')), deviceControl, join(experimentRoot, 'config/notifications'));
 engine.pollDevice();
 /** 每秒回收设备事件、执行已隔离异常的控制任务并推进实验。 */
@@ -34,7 +37,7 @@ server.listen(port, process.env.HOST ?? '0.0.0.0', () => {
   console.log(`实验员后台：http://127.0.0.1:${port}/admin`);
   if ((process.env.HOST ?? '0.0.0.0') === '0.0.0.0') for (const item of lanAddresses(port)) console.log(`其他设备（${item.name}）：${item.base_url}/admin`);
   console.log(`数据库：${join(runtime, 'experiment.sqlite')}`);
-  console.log(mode === 'mock' ? '当前为 Mock 预演模式，不能用于真实消息呈现实验。' : `当前为雷鸟 USB 模式，设备：${adapter.getStatus().device_id ?? '尚未配置序列号'}；硬件呈现仍需现场验收。`);
+  console.log(mode === 'mock' ? '当前为 Mock 预演模式，不能用于真实消息呈现实验。' : `当前为共享显示端真机模式，设备：${adapter.getStatus().device_id ?? '尚未配置序列号'}；硬件呈现仍需现场验收。`);
 });
 let stopping = false;
 /** 先停止定时任务并等待设备控制退出，再正常关闭连接与数据库。 */

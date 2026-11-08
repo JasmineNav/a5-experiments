@@ -42,8 +42,17 @@ export class Engine {
   /** 真机必须声明支持当前固定时长；旧版显示端（如1.1.3）只接受8500，发送后会被拒绝且不重发。 */
   requireFixedDuration(mode: DisplayMode, durationMs = this.material.content.message_duration_ms) {
     const device = this.adapter.getStatus();
-    if (mode === 'confirm_until_ack' || device.source !== 'device' || device.device_info?.fixed_duration_ms?.split(',').includes(String(durationMs))) return;
-    throw new HttpError(409, `当前眼镜显示端（${device.device_info?.app_version ?? '未知版本'}）不支持${durationMs / 1000}秒固定时长，请先安装最新显示端 APK（1.1.4 及以上）。`);
+    if(device.source!=='device')return;
+    const caps=device.capabilities;
+    if(caps){
+      const wanted=mode==='confirm_until_ack'?'confirm_until_ack':'timed';
+      if(!caps.commands.includes('show_text')||!caps.display_modes.includes(wanted)||durationMs<caps.text_duration_ms.min||durationMs>caps.text_duration_ms.max)throw new HttpError(409,'显示端能力不支持当前模式或时长，请更新共享显示端 APK。');
+      if(mode==='tone_8500'&&(!caps.tone||!caps.tone_presets?.includes('notification')))throw new HttpError(409,'显示端缺少通知音能力，不能静默降级为无声。');
+      return;
+    }
+    // 历史显式能力保留给旧快照/测试适配器，v2 真机客户端不走此兼容分支。
+    if(mode==='confirm_until_ack'||device.device_info?.fixed_duration_ms?.split(',').includes(String(durationMs)))return;
+    throw new HttpError(409,`当前眼镜显示端（${device.device_info?.app_version??'未知版本'}）不支持${durationMs/1000}秒固定时长，请更新显示端 APK。`);
   }
   private requirePreviousMessageFinished(s: Session) {
     if (this.store.interventions(s.id).some(m => m.data_kind === 'manual' && m.display_mode !== 'confirm_until_ack' && m.status !== 'failed' && (m.source === 'device' ? !m.device_events?.some(e => e.kind === 'hidden') : !!m.t_send && this.wallNow()-Date.parse(m.t_send)<m.duration_ms))) throw new HttpError(409, '手动通知仍在显示，请等待后再触发下一条。');
@@ -51,9 +60,10 @@ export class Engine {
   }
   private deviceUnavailable(s: Session) {
     const target = this.adapter.getStatus();
-    return this.deliverySource(s) === 'device' && (!target.connected || !target.ready || target.busy || target.device_id !== s.state.device_id);
+    return this.deliverySource(s) === 'device' && (this.deviceOperationsBusy?.() || !target.connected || !target.ready || target.busy || target.device_id !== s.state.device_id);
   }
   private guardTrigger(s: Session, timing: 'T0' | 'T1') {
+    if(this.deviceOperationsBusy?.())throw new HttpError(409,'眼镜整备正在执行，请等待完成。');
     if (this.assignment(s).condition.endsWith(timing) && !this.store.interventions(s.id).some(m => m.stage_id === this.assignment(s).stage_id)) {
       this.requirePreviousMessageFinished(s);
       if (this.deviceUnavailable(s)) throw new HttpError(409,'眼镜未就绪或正在展示，当前触发操作未执行。请恢复眼镜后重试；不会补发旧消息。');
@@ -129,6 +139,7 @@ export class Engine {
   }
   /** 由设备控制器提供互斥状态，阻止在控制或独立通知期间创建会话。 */
   deviceControlBusy?: () => boolean;
+  deviceOperationsBusy?: () => boolean;
   /** 优先消费独立通知事件；返回 true 时不写入实验消息记录。 */
   deviceDebugEvent?: (event: GlassesEvent) => boolean;
   readonly store: Store;
@@ -214,7 +225,7 @@ export class Engine {
     if (this.store.ids().some(id => { const s = this.session(id); return s.snapshot.participant.participant_id === participantId && s.state.status === 'active'; })) throw new HttpError(409, '该被试已有未结束会话，请恢复已有会话。');
     const device = this.adapter.getStatus();
     if (device.source === 'device') {
-      if (participant.stages.some(a => a.condition !== 'NONE' && (a.display_mode ?? mode) !== 'legacy_8500' && !device.device_info?.display_modes?.split(',').includes(String(a.display_mode ?? mode)))) throw new HttpError(409, '当前眼镜应用不支持所选策略，请先更新显示端 APK。');
+      if (!device.capabilities && participant.stages.some(a => a.condition !== 'NONE' && (a.display_mode ?? mode) !== 'legacy_8500' && !device.device_info?.display_modes?.split(',').includes(String(a.display_mode ?? mode)))) throw new HttpError(409, '当前眼镜应用不支持所选策略，请先更新显示端 APK。');
       for (const a of participant.stages) if (a.condition !== 'NONE') this.requireFixedDuration((a.display_mode ?? mode) as DisplayMode);
       if (!device.connected || !device.ready || device.busy || !device.device_id) throw new HttpError(409, '眼镜尚未就绪，请检查 USB、授权和显示端前台状态。');
       if (this.store.ids().some(id => { const existing = this.session(id); return existing.state.status === 'active' && existing.state.device_id === device.device_id; })) throw new HttpError(409, '此眼镜已绑定一个进行中的会话，请先结束该会话。');
@@ -608,7 +619,7 @@ export class Engine {
     this.requireFixedDuration(mode, s.snapshot.content.message_duration_ms);
     if(device.busy || this.store.interventions(id).some(m=>['scheduled','send_requested'].includes(m.status))) throw new HttpError(409,'眼镜正在显示消息，请等待结束后手动发送；不会覆盖或排队。');
     this.requirePreviousMessageFinished(s);
-    if(mode!=='legacy_8500' && !device.device_info?.display_modes?.split(',').includes(mode)) throw new HttpError(409,'眼镜不支持所选模态。');
+    if(!device.capabilities && mode!=='legacy_8500' && !device.device_info?.display_modes?.split(',').includes(mode)) throw new HttpError(409,'眼镜不支持所选模态。');
     this.store.tx(()=>{this.scheduleAuxiliary(s,'MANUAL_'+requestId,text,mode,'manual',requestId);this.store.save(s);});
     this.dispatch(id);return this.store.findRequest(requestId)!;
   }
@@ -687,6 +698,7 @@ export class Engine {
     });
   }
   pollDevice() {
+    if(this.deviceOperationsBusy?.())return;
     if (!this.adapter.pollEvents) return;
     const task = this.adapter.pollEvents(event => this.receiveDeviceEvent(event)).then(() => {
       const status = this.adapter.getStatus();

@@ -6,7 +6,7 @@ type Runner = (file: string, args: string[]) => Promise<string>;
 /** 只约束已确认抢焦点的语音悬浮窗；不按共享 system UID 限制其他系统包。 */
 export class VoiceOverlayGuard {
   private readonly store: Store;
-  private readonly serial: string;
+  private serial: string;
   private readonly adb: string;
   private readonly run: Runner;
   private readonly clock: Clock;
@@ -18,6 +18,13 @@ export class VoiceOverlayGuard {
   constructor(store: Store, options: { serial: string; adb: string; run: Runner; clock: Clock; audit: (action: string, detail: unknown) => void }) {
     this.store = store; this.serial = options.serial; this.adb = options.adb; this.run = options.run; this.clock = options.clock; this.audit = options.audit;
   }
+  static moveBackup(store:Store,from:string,to:string){
+    if(from===to)return;const source=`device_voice_overlay_backup:${from}`,target=`device_voice_overlay_backup:${to}`;
+    const backup=store.setting<{mode:string}|null>(source);if(!backup)return;
+    const existing=store.setting<{mode:string}|null>(target);if(existing&&existing.mode!==backup.mode)throw new Error('目标路由存在不同权限备份，不能覆盖。');
+    store.tx(()=>{store.setSetting(target,backup);store.setSetting(source,null);});
+  }
+  rebind(serial:string){this.serial=serial;this.checkedAt=-Infinity;this.value.state='pending';}
   /** 将权限备份按设备序列号隔离，防止跨设备恢复。 */
   private key() { return `device_voice_overlay_backup:${this.serial}`; }
   /** 读取持久化的原权限；解析失败交给调用边界处理。 */

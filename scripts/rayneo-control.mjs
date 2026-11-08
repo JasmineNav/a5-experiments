@@ -14,7 +14,9 @@ const source = root;
 const experimentIndex = process.argv.indexOf('--experiment');
 const name = experimentIndex === -1 ? 'f5-sh-pilot' : process.argv[experimentIndex + 1];
 if (!/^f5-(sh|sl)-[a-z0-9-]+$/.test(name ?? '')) throw new Error('--experiment 必须是 f5-sh-* 或 f5-sl-* 实验目录名。');
-const pkg = 'link.ironip.a5.rayneo.localfix';
+const pkg = 'link.ironip.glasses.display';
+const expectedVersion='2.2.0';
+const expectedSha='ee4f46b806581c1be471eaa81d1a37447d6dace961a883c4d8f0673f14a6895d';
 const configPath = join(local, 'device.json');
 const action = process.argv[2] ?? 'start';
 const noOpen = process.argv.includes('--no-open');
@@ -55,27 +57,22 @@ async function device() {
   const adb = await resolveAdb(config);
   const output = await runAdb(adb, ['devices']);
   const devices = output.split(/\r?\n/).map(line => line.trim().split(/\s+/)).filter(parts => parts.length >= 2 && !parts[0].startsWith('*') && parts[0] !== 'List');
-  if (devices.some(parts => parts[1] === 'unauthorized')) throw new Error('眼镜尚未授权 USB 调试。请在眼镜中确认“允许 USB 调试”后重新启动。');
+
   const connected = devices.filter(parts => parts[1] === 'device');
   let serial = config.serial;
-  if (!serial) {
-    if (!connected.length) throw new Error('ADB 未发现已连接的眼镜。请检查 USB 数据线及 USB 调试授权；若 Windows 已识别眼镜，请先右键“安装眼镜USB驱动（管理员）.bat”以管理员运行，按驱动说明处理后拔插 USB。');
-    if (connected.length !== 1) throw new Error('发现多台 Android 设备，请仅保留目标眼镜，或在 .a5-local/device.json 中指定 serial。');
-    serial = connected[0][0];
-  }
-  if (!connected.some(parts => parts[0] === serial)) throw new Error('已绑定的眼镜未连接或尚未就绪。请连接原眼镜并确认 USB 调试授权。');
-  if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(serial)) throw new Error('设备序列号格式不符合本项目要求。');
-  const packageName = config.packageName ?? pkg;
-  if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(packageName)) throw new Error('显示程序包名无效。');
+  if(!serial&&connected.length===1)serial=connected[0][0];
+  if(!serial||!connected.some(parts=>parts[0]===serial))return {adb,serial:serial??'',connected:false};
+  if(!/^[A-Za-z0-9_.:-]{1,128}$/.test(serial))throw new Error('设备路由格式无效。');
+  const packageName=pkg;
   await mkdir(local, { recursive: true });
   await writeFile(configPath, JSON.stringify({ ...config, adbPath: adb, serial }, null, 2) + '\n', { mode: 0o600 });
   const localScrcpy = join(local, 'scrcpy', 'scrcpy.exe');
   let scrcpyPath = config.scrcpyPath;
   try { await execute(localScrcpy, ['--version'], { cwd: root, windowsHide: true, timeout: 5000 }); scrcpyPath = localScrcpy; } catch {}
-  return { adb, serial, port: requestedPort ?? (name === 'f5-sh-pilot' ? config.port ?? 5173 : undefined), packageName, scrcpyPath,
-    activityName: `${packageName}/link.ironip.a5.rayneo.MainActivity`,
-    apkPath: config.apkPath ?? join(local, 'artifacts', 'a5-rayneo-display-localfix.apk'),
-    apkSha256: config.apkSha256 ?? '' };
+  return { connected:true,adb, serial, port: requestedPort ?? (name === 'f5-sh-pilot' ? config.port ?? 5173 : undefined), packageName, scrcpyPath,
+    activityName: `${packageName}/link.ironip.glasses.display.MainActivity`,
+    apkPath: config.packageName===pkg&&config.apkPath?config.apkPath:join(local,'artifacts','glasses-display-2.2.0-debug.apk'),
+    apkSha256:config.packageName===pkg&&config.apkSha256?config.apkSha256:expectedSha };
 }
 async function health(port) {
   const response = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(2000) });
@@ -84,7 +81,7 @@ async function health(port) {
 }
 function describe(value) {
   const adapter = value.adapter;
-  console.log(`运行模式：${value.mock_only ? 'Mock 预演' : '雷鸟 USB 真机'}`);
+  console.log(`运行模式：${value.mock_only ? 'Mock 预演' : '共享显示端真机'}`);
   if (value.mock_only) {
     console.log('真机连接：未使用（Mock 预演不检测或驱动眼镜）');
     console.log(`显示状态：${adapter.busy ? '正在模拟展示' : '模拟预演就绪'}`);
@@ -127,7 +124,7 @@ try {
       console.log(`Mock 预演已在运行：http://127.0.0.1:${current.port}/admin`);
     } else {
       process.env.A5_GLASSES_MODE = 'mock';
-      for (const key of ['A5_RAYNEO_SERIAL', 'A5_ADB_PATH', 'A5_RAYNEO_PACKAGE', 'A5_SCRCPY_PATH', 'A5_RAYNEO_HOST_MODE']) delete process.env[key];
+      for (const key of ['A5_GLASSES_SERIAL','A5_GLASSES_PACKAGE','A5_DEVICE_IDENTITY','A5_RAYNEO_SERIAL', 'A5_ADB_PATH', 'A5_RAYNEO_PACKAGE', 'A5_SCRCPY_PATH', 'A5_RAYNEO_HOST_MODE']) delete process.env[key];
       const started = await manager.startExperiment(name, requestedPort ?? (name === 'f5-sh-pilot' ? (await readConfig()).port ?? 5173 : undefined));
       console.log(`Mock 预演已启动：http://127.0.0.1:${started.port}/admin`);
     }
@@ -135,50 +132,40 @@ try {
     describe(await health(status.port));
     if (!noOpen) await open(manager);
   } else if (action === 'start') {
-    let current = await manager.getStatus(name);
-    if (current.status === 'unmanaged') throw new Error('发现其他终端启动的服务。请先在原终端正常停止，再使用本入口。');
-    const target = await device();
-    if (current.status === 'running' && (await health(current.port)).mock_only) {
-      console.log('正在正常停止现有 Mock 服务，并切换到 USB 真机模式……');
-      await manager.stopExperiment(name);
-      current = await manager.getStatus(name);
-    }
-    if (current.status === 'running') {
-      const value = await health(current.port);
-      if (value.mock_only || value.adapter.device_id !== `adb:${target.serial}`) throw new Error('现有服务的模式或绑定设备不同。请先在总 BAT 中选择 3 正常停止，再启动真机模式。');
-      if (!value.adapter.busy && (!value.adapter.ready || value.adapter.device_info?.app_package !== target.packageName)) {
-        await runAdb(target.adb, ['-s', target.serial, 'shell', 'am', 'start', '-n', target.activityName]);
-      }
-    } else {
-      const installed = await runAdb(target.adb, ['-s', target.serial, 'shell', 'pm', 'list', 'packages', target.packageName]);
-      if (!installed.split(/\r?\n/).includes(`package:${target.packageName}`)) {
-        const apk = target.apkPath;
-        const sha = createHash('sha256').update(await readFile(apk)).digest('hex');
-        if (sha !== target.apkSha256) throw new Error('APK 文件校验失败，请保留原文件并检查发布包。');
-        console.log('正在安装眼镜显示程序……');
-        const result = await runAdb(target.adb, ['-s', target.serial, 'install', '-r', apk]);
-        if (!result.includes('Success')) throw new Error('眼镜 APK 安装未成功。请检查安装错误；不要卸载或清除现有数据。');
-      }
-      await runAdb(target.adb, ['-s', target.serial, 'shell', 'am', 'start', '-n', target.activityName]);
-      process.env.A5_GLASSES_MODE = 'rayneo';
-      process.env.A5_RAYNEO_SERIAL = target.serial;
-      process.env.A5_ADB_PATH = target.adb;
-      process.env.A5_RAYNEO_PACKAGE = target.packageName;
-      if (target.scrcpyPath) process.env.A5_SCRCPY_PATH = target.scrcpyPath;
-      const started = await manager.startExperiment(name, target.port);
+    let current=await manager.getStatus(name);
+    if(current.status==='unmanaged')throw new Error('请先正常停止原终端的服务。');
+    const config=await readConfig();
+    if(current.status==='running'&&(await health(current.port)).mock_only)throw new Error('当前为 Mock，请先正常停止再启动真机；不静默切换。');
+    if(current.status!=='running'){
+      process.env.A5_GLASSES_MODE='device';process.env.A5_GLASSES_SERIAL=config.serial??'';process.env.A5_GLASSES_PACKAGE=pkg;
+      if(config.adbPath)process.env.A5_ADB_PATH=config.adbPath;
+      if(config.scrcpyPath)process.env.A5_SCRCPY_PATH=config.scrcpyPath;
+      const started=await manager.startExperiment(name,requestedPort??(name==='f5-sh-pilot'?config.port??5173:undefined));
       console.log(`电脑端已启动：http://127.0.0.1:${started.port}/admin`);
     }
-    const status = await manager.getStatus(name);
-    let value;
-    for (let i = 0; i < 10; i++) {
-      value = await health(status.port);
-      if (value.adapter.connected && value.adapter.ready) break;
-      await delay(1000);
-    }
-    describe(value);
-    if (!noOpen) await open(manager);
-    if (!value.adapter.connected || !value.adapter.ready) throw new Error('电脑端已启动，但显示端尚未就绪。请保持“A5 雷鸟显示”在眼镜前台，再查看项目状态。');
-    console.log('请保持 USB 连接和眼镜显示程序在前台。');
+    // 先开后台，再处理硬件整备；没有 USB/ADB 也不阻止进入 Web。
+    if(!noOpen)await open(manager);
+    const status=await manager.getStatus(name);
+    describe(await health(status.port));
+    try{
+      const target=await device();
+      if(target.connected){
+        const installed=await runAdb(target.adb,['-s',target.serial,'shell','dumpsys','package',pkg]);
+        const version=/versionName=(\S+)/.exec(installed)?.[1];
+        if(version!==expectedVersion){
+          const sha=createHash('sha256').update(await readFile(target.apkPath)).digest('hex');
+          if(sha!==target.apkSha256)throw new Error('共享显示端 APK SHA-256 不符，未安装。');
+          const value=await health(status.port);
+          if(value.adapter.busy)throw new Error('眼镜仍有展示，暂不更新 APK。');
+          const result=await runAdb(target.adb,['-s',target.serial,'install','-r',target.apkPath]);
+          if(!result.includes('Success'))throw new Error('APK 安装失败；不要卸载或清除账本数据。');
+          const after=await runAdb(target.adb,['-s',target.serial,'shell','dumpsys','package',pkg]);
+          if(!after.includes(`versionName=${expectedVersion}`))throw new Error('安装后版本核对失败。');
+          console.log(`共享显示端 ${expectedVersion} 已安装。`);
+        }
+      }
+    }catch(error){console.log(`硬件整备待处理：${error.message}；请在 Web 运行设备自检。`);}
+    console.log('在 Web 按「选设备 → 连通道 → 打开显示端 → 试发验证」整备，可用 USB 或无线；路由由后端记忆。');
   } else throw new Error('未知操作。支持 start、mock、stop、open、status。');
 } catch (error) {
   console.error(`操作未完成：${error.message}`);

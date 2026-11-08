@@ -218,12 +218,16 @@
 
         <section class="card" aria-labelledby="device-title">
           <h3 id="device-title" class="card-title">眼镜与显示端</h3>
+          <ol id="device-steps" class="action-row" aria-label="眼镜整备步骤"><li>选设备</li><li>连通道</li><li>打开显示端</li><li>试发验证</li></ol>
+          <div class="action-row"><button id="device-list" type="button" class="btn">扫描设备</button><select id="device-select" aria-label="设备路由"><option value="">请选择设备</option></select><select id="device-identity" aria-label="身份模式"><option value="adb">ADB 标识（默认）</option><option value="hardware">硬件标识（可选）</option></select><button id="device-bind" type="button" class="btn">选择并连通道</button></div>
+          <div class="action-row"><input id="device-ip" aria-label="眼镜 IP" placeholder="192.168.1.23:5555"><button id="device-connect" type="button" class="btn">输入 IP 连接</button><button id="device-wireless" type="button" class="btn">插 USB 开启无线</button><button id="device-doctor" type="button" class="btn">设备自检</button></div>
+          <p id="device-route-status" class="hint" aria-live="polite"></p><div id="device-doctor-results" class="check-result"></div><p id="device-clock" class="hint"></p>
           <p id="device-detail" class="device-detail"></p>
           <p id="device-host-state" class="hint" aria-live="polite"></p>
           <div class="action-row device-controls">
             <button id="device-open" type="button" class="btn primary">唤醒并打开显示端</button>
             <button id="device-probe" type="button" class="btn">刷新设备状态</button>
-            <button id="device-reconnect" type="button" class="btn">重新连接 USB 通道</button>
+            <button id="device-reconnect" type="button" class="btn">重新连接通道</button>
             <button id="device-host" type="button" class="btn" aria-pressed="false">开启上位机守护</button>
             <button id="device-scrcpy" type="button" class="btn">打开眼镜画面（scrcpy）</button>
           </div>

@@ -22,5 +22,8 @@
   "devDependencies": {
     "@types/node": "^26.6.5",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@lab/glasses-display": "file:vendor/glasses-display/host"
   }
 }

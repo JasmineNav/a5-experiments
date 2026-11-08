@@ -1,0 +1,3 @@
+[submodule "vendor/glasses-display"]
+	path = vendor/glasses-display
+	url = https://github.com/5nix/glasses-display.git
