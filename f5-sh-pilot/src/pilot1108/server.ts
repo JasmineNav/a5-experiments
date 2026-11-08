@@ -24,7 +24,7 @@ const runtime = resolve(process.env.A5_PILOT_RUNTIME_DIR ?? join(import.meta.dir
 await mkdir(runtime, { recursive: true });
 const store = new PilotStore(join(runtime, 'pilot.sqlite'));
 const server = createPilotApp(store, defaults);
-const ticker = setInterval(() => store.tick(), 250); ticker.unref();
+const ticker = setInterval(() => store.tick(), 1000); ticker.unref();
 let stopping = false;
 function shutdown() {
   if (stopping) return; stopping = true; clearInterval(ticker);

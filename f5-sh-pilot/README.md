@@ -45,3 +45,7 @@ Windows项目已配置 `.a5-local/device.json` 时，启动器自动使用项目
 | [TESTING.md](TESTING.md) | 验证：检查方法、覆盖范围与待验收项目 |
 
 [docs/](docs/)保留原始需求及材料，不是当前操作手册；与当前规则冲突时以DECISIONS为准。
+
+## 11-08 材料可行性 pilot（独立入口）
+
+`npm run start:pilot --workspace=f5-sh-pilot`，默认本机5173。不会替换本README原流程，不发眼镜消息；启动、配置、日志和待确认项见 [PILOT-1108.md](PILOT-1108.md)。

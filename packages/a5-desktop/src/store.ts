@@ -33,7 +33,7 @@ export interface RestState {
 }
 export interface RestReminder { id: string; text: string; sent_at: string; sent_elapsed_ms: number; displayed: boolean }
 /** version 为乐观锁版本号：读取时带出，save 时校验并递增；新建会话为 0。 */
-export interface Session { id: string; token_hash: string; version?: number; state: State; snapshot: Snapshot }
+export interface Session<S = State, P = Snapshot> { id: string; token_hash: string; version?: number; state: S; snapshot: P }
 /** 保存时发现会话已被他处更新：拒绝覆盖，由调用方重新读取后再处理。 */
 export class StateConflictError extends Error {
   readonly session_id: string; readonly expected_version: number;
@@ -61,9 +61,10 @@ export interface Intervention {
   display_time_source: string; receipt: unknown; error: string | null;
 }
 
-export class Store {
+/** 状态/快照类型可扩展；默认类型及正式 SH/SL 的运行行为保持不变。 */
+export class Store<S = State, P = Snapshot> {
   readonly db: DatabaseSync;
-  private readonly snapshots = new Map<string, Snapshot>();
+  private readonly snapshots = new Map<string, P>();
   constructor(path: string) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
@@ -115,7 +116,7 @@ export class Store {
     catch (error) { this.db.exec('ROLLBACK'); throw error; }
     finally { this.txDepth = 0; }
   }
-  create(session: Session) {
+  create(session: Session<S, P>) {
     this.tx(() => {
       const state = JSON.stringify(session.state);
       this.db.prepare('INSERT INTO sessions(id,token_hash,state,snapshot,version) VALUES (?,?,?,?,0)').run(session.id, session.token_hash, state, JSON.stringify(session.snapshot));
@@ -124,11 +125,11 @@ export class Store {
     session.version = 0;
     this.snapshots.set(session.id, session.snapshot);
   }
-  get(id: string): Session | undefined {
+  get(id: string): Session<S, P> | undefined {
     const row = this.db.prepare('SELECT id,token_hash,state,version FROM sessions WHERE id=?').get(id) as { id: string; token_hash: string; state: string; version: number } | undefined;
     if (!row) return;
     let snapshot = this.snapshots.get(id);
-    if (!snapshot) { const stored = this.db.prepare('SELECT snapshot FROM sessions WHERE id=?').get(id) as { snapshot: string }; snapshot = JSON.parse(stored.snapshot) as Snapshot; this.snapshots.set(id, snapshot); }
+    if (!snapshot) { const stored = this.db.prepare('SELECT snapshot FROM sessions WHERE id=?').get(id) as { snapshot: string }; snapshot = JSON.parse(stored.snapshot) as P; this.snapshots.set(id, snapshot); }
     return { id: row.id, token_hash: row.token_hash, version: row.version, state: JSON.parse(row.state), snapshot };
   }
   ids() { return (this.db.prepare("SELECT id FROM sessions WHERE json_extract(state,'$.deleted') IS NULL ORDER BY rowid").all() as { id: string }[]).map(r => r.id); }
@@ -139,7 +140,7 @@ export class Store {
   }
   deletedIds() { return (this.db.prepare("SELECT id FROM sessions WHERE json_extract(state,'$.deleted') IS NOT NULL ORDER BY rowid").all() as { id: string }[]).map(r => r.id); }
   /** 乐观锁保存：版本不符抛 StateConflictError，不静默覆盖；成功后在同一事务追加状态日志并推进 session.version。 */
-  save(session: Session) {
+  save(session: Session<S, P>) {
     const expected = session.version ?? 0, state = JSON.stringify(session.state);
     this.tx(() => {
       const result = this.db.prepare('UPDATE sessions SET state=?, version=version+1 WHERE id=? AND version=?').run(state, session.id, expected);
@@ -149,7 +150,7 @@ export class Store {
     session.version = expected + 1;
   }
   /** 会话状态变更历史（含基线版本），按版本升序，供重建与审计。 */
-  stateLog(id: string): { version: number; state: State }[] {
+  stateLog(id: string): { version: number; state: S }[] {
     return (this.db.prepare('SELECT version,state FROM session_state_log WHERE session_id=? ORDER BY version').all(id) as { version: number; state: string }[]).map(r => ({ version: r.version, state: JSON.parse(r.state) }));
   }
   event(event: EventRecord) { this.db.prepare('INSERT INTO events(event_id,session_id,data) VALUES (?,?,?)').run(event.event_id, event.session_id, JSON.stringify(event)); }

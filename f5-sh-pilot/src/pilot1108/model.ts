@@ -84,7 +84,7 @@ export interface State {
 }
 export type Action = { type: 'compute' | 'requirements' | 'next' } |
   { type: 'input'; field: Field; value: string } | { type: 'ratings'; values: Ratings };
-export interface Event { type: string; elapsed_ms: number; task_id: string; data: unknown }
+export interface Event { type: string; elapsed_ms: number; task_id: string; stage?: Stage; data: unknown }
 export function initial(id: string, participant: string, config: Config, at: string): State {
   if (!/^[A-Za-z0-9_-]{1,40}$/.test(participant)) throw new Error('被试编号仅允许1—40位字母、数字、下划线或连字符。');
   return { schema_version: 1, material_version: 'sh-pilot-2026-11-08', id, participant, config, created_at: at,
@@ -109,7 +109,7 @@ export function transition(previous: State, action: Action, now: number): { stat
   if (state.stage === 'done') throw new Error('会话已完成。');
   const t = state.trials[state.index];
   const events = marker(state, now);
-  const emit = (type: string, data: unknown = {}) => events.push({ type, elapsed_ms: now, task_id: t.task.id, data });
+  const emit = (type: string, data: unknown = {}) => events.push({ type, elapsed_ms: now, task_id: t.task.id, stage: state.stage, data });
   const scales = !t.task.practice || state.config.practiceScales;
   const startTranscription = () => { state.stage = 'transcribe'; t.step2_start_ms = now; emit('phase2_started'); };
   if (action.type === 'compute' && state.stage === 'requirements') {

@@ -4,8 +4,11 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
+import { fork } from 'node:child_process';
+import { createServer } from 'node:net';
+import { fileURLToPath } from 'node:url';
 import { configuration, taskSequence, standard, initial, transition, emptyAnswers, score, marker, view, summary, FIELDS } from '../src/pilot1108/model.ts';
-import type { State, Action, Config, Task } from '../src/pilot1108/model.ts';
+import type { State, Action, Config } from '../src/pilot1108/model.ts';
 import { PilotStore } from '../src/pilot1108/store.ts';
 import { createPilotApp } from '../src/pilot1108/app.ts';
 
@@ -142,7 +145,7 @@ test('1108：T1和T2只记录候选事件，本轮所有事件不发送消息', 
   r = transition(r.state, { type: 'input', field: 'B', value: '2.1' }, 6100); assert.ok(r.events.every(e => e.type !== 't2_candidate'));
 });
 test('1108：SQLite命令幂等、旧页拒绝、失败回滚、事件不可更改', () => {
-  let now = 0; const store = new PilotStore(':memory:', () => now);
+  let now = 0; const store = new PilotStore(':memory:', { mono: () => now, wall: () => Date.now() });
   try {
     const v = store.create('P01', {}); now = 1000;
     const a = { type: 'compute' } as const;
@@ -153,19 +156,19 @@ test('1108：SQLite命令幂等、旧页拒绝、失败回滚、事件不可更�
     assert.throws(() => store.command(v.id, 'invalid', 1, { type: 'next' }), /填写/);
     assert.equal(store.get(v.id).revision, 1);
     assert.equal(store.export(v.id).events.filter(e => e.type === 'compute_opened').length, 1);
-    assert.throws(() => store.db.exec("UPDATE events SET received_at='bad'"), /事件只允许追加/);
-    assert.throws(() => store.db.exec('DELETE FROM events'), /事件只允许追加/);
+    assert.throws(() => store.db.exec("UPDATE events SET data='bad'"), /events are append-only/);
+    assert.throws(() => store.db.exec('DELETE FROM events'), /events are append-only/);
     assert.throws(() => store.create('P01', {}), /已有会话/);
   } finally { store.close(); }
 });
 test('1108：落盘恢复包含草稿、配置、时刻和重启不连续证据，不重发事件', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'a5-1108-')); let now = 0;
-  const path = join(dir, 'pilot.sqlite'); let store = new PilotStore(path, () => now);
+  const path = join(dir, 'pilot.sqlite'); let store = new PilotStore(path, { mono: () => now, wall: () => Date.now() });
   try {
     const v = store.create('P03', { feedback: 'message' }); now = 1000;
     store.command(v.id, 'c1', 0, { type: 'compute' }); now = 1500;
     store.command(v.id, 'c2', 1, { type: 'input', field: 'A', value: '1.50' });
-    store.close(); now = 9000; store = new PilotStore(path, () => now);
+    store.close(); now = 9000; store = new PilotStore(path, { mono: () => now, wall: () => Date.now() });
     assert.equal(store.get(v.id).trials[0].compute.A, '1.50'); assert.equal(store.get(v.id).config.order, 'feedback-first');
     now = 10000; store.command(v.id, 'c3', 2, { type: 'input', field: 'B', value: '2' });
     assert.equal(store.get(v.id).trials[0].t0_ms, 2500);
@@ -212,7 +215,88 @@ test('1108：独立模式不加载适配器，不改变原启动入口；无逐�
   const entry = await readFile(new URL('../src/server.ts', import.meta.url), 'utf8');
   assert.match(entry, /@a5\/desktop\/server.ts/);
   const pilot = await readFile(new URL('../src/pilot1108/server.ts', import.meta.url), 'utf8');
-  assert.doesNotMatch(pilot, /GlassesAdapter|@a5\/glasses|@a5\/desktop/);
+  assert.doesNotMatch(pilot, /GlassesAdapter|@a5\/glasses/);
   const js = await readFile(new URL('../public/pilot1108/pilot.js', import.meta.url), 'utf8');
   assert.match(js, /current && current.stage !== 'done' \? ''/);
+});
+
+test('1108：公共Clock隔离墙钟回拨；公共Store状态历史不可改且拒绝旧版本覆盖', () => {
+  let mono = 0, wall = 100000;
+  const store = new PilotStore(':memory:', { mono: () => mono, wall: () => wall });
+  try {
+    const v = store.create('P01', {}); const stale = store.shared.get(v.id)!;
+    mono = 1000; wall = 10000; store.command(v.id, 'clock-1', 0, { type: 'compute' });
+    mono = 1500; wall = 2000000; store.command(v.id, 'clock-2', 1, { type: 'input', field: 'A', value: '1.5' });
+    mono = 2000; wall = 100; store.command(v.id, 'clock-3', 2, { type: 'input', field: 'B', value: '2' });
+    assert.equal(store.get(v.id).trials[0].t0_ms, 2000);
+    assert.throws(() => store.shared.save(stale), /版本冲突/);
+    const log = store.shared.stateLog(v.id);
+    assert.deepEqual(log.map(l => l.version), [0, 1, 2, 3]);
+    assert.throws(() => store.db.exec("UPDATE session_state_log SET state='bad'"), /append-only/);
+    assert.throws(() => store.db.exec('DELETE FROM session_state_log'), /append-only/);
+    assert.equal(store.export(v.id).intervention_history.length, 0);
+    mono = 21000; store.tick(); store.tick();
+    assert.equal(store.export(v.id).events.filter(e => e.type === 't0_20s_secondary').length, 1);
+    assert.equal(store.get(v.id).revision, 3); // checkpoint版本不污染浏览器命令版本
+  } finally { store.close(); }
+});
+test('1108：三种反馈×两种顺序均通过持久化完整会话，事件及判分可导出', () => {
+  for (const feedback of ['registered', 'progress', 'message'] as const) for (const order of ['no-feedback-first', 'feedback-first'] as const) {
+    let now = 0, commands = 0; const store = new PilotStore(':memory:', { mono: () => now, wall: () => 1000000 + now });
+    try {
+      const v = store.create('P01', { feedback, order });
+      const send = (action: Action) => { now += 1000; const state = store.get(v.id); return store.command(v.id, `full-${++commands}`, state.revision, action); };
+      for (let trial = 0; trial < 3; trial++) {
+        send({ type: 'compute' }); const expected = standard(store.get(v.id).trials[trial].task);
+        for (const field of FIELDS) send({ type: 'input', field, value: expected[field] });
+        send({ type: 'next' });
+        if (trial) send({ type: 'ratings', values: rates1 });
+        for (const field of FIELDS) send({ type: 'input', field, value: expected[field] });
+        send({ type: 'next' });
+        if (trial) send({ type: 'ratings', values: rates2 });
+      }
+      now += 30000; store.tick(); const exported = store.export(v.id);
+      assert.equal(exported.state.stage, 'done'); assert.equal(exported.state.config.feedback, feedback);
+      assert.equal(exported.events.filter(e => e.type === 't0_20s_secondary').length, 3);
+      assert.equal(exported.events.filter(e => e.type === 't0_behavioral_candidate').length, 3);
+      assert.ok(exported.trials.every(t => t.phase1_accuracy!.accuracy === 1 && t.phase2_copy_accuracy!.accuracy === 1));
+      assert.ok(exported.events.filter(e => e.type === 'completion_feedback_state').every(e => e.task_id === 'SH01-feedback'));
+      assert.equal(exported.state_history.length, commands + 2); // 基线、命令、一次tick
+      assert.equal(exported.intervention_history.length, 0);
+    } finally { store.close(); }
+  }
+});
+
+test('1108：真实独立入口接收环境配置、落盘并支持IPC正常关闭', { timeout: 10000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'a5-1108-server-'));
+  const probe = createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening');
+  const address = probe.address(); assert.ok(address && typeof address !== 'string'); const port = address.port;
+  await new Promise<void>(resolve => probe.close(() => resolve()));
+  const child = fork(fileURLToPath(new URL('../src/pilot1108/server.ts', import.meta.url)), [], {
+    env: { ...process.env, PORT: String(port), A5_PILOT_RUNTIME_DIR: dir, A5_PILOT_FEEDBACK: 'message', A5_PILOT_ORDER: 'feedback-first' },
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+  });
+  let stdout = '', stderr = ''; child.stdout!.on('data', b => { stdout += b; }); child.stderr!.on('data', b => { stderr += b; });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`服务启动超时：${stdout} ${stderr}`)), 5000);
+      child.stdout!.on('data', () => { if (stdout.includes('11-08材料pilot：')) { clearTimeout(timer); resolve(); } });
+      child.once('exit', code => { clearTimeout(timer); reject(new Error(`服务提前退出：${code} ${stderr}`)); });
+    });
+    const base = `http://127.0.0.1:${port}`;
+    const html = await (await fetch(base + '/')).text(); const token = html.match(/name="pilot-token" content="([a-f0-9]+)"/)![1];
+    const headers = { 'X-Pilot-Token': token, 'Content-Type': 'application/json' };
+    const response = await fetch(base + '/api/sessions', { method: 'POST', headers, body: JSON.stringify({ participant: 'P01' }) });
+    assert.equal(response.status, 201); const v = await response.json() as ReturnType<typeof view>;
+    const exited = once(child, 'exit'); child.send({ type: 'a5:shutdown' });
+    const [code] = await exited; assert.equal(code, 0, stderr);
+    const store = new PilotStore(join(dir, 'pilot.sqlite'));
+    try {
+      assert.equal(store.get(v.id).config.feedback, 'message'); assert.equal(store.get(v.id).config.order, 'feedback-first');
+      assert.ok(store.export(v.id).state_history.length >= 2);
+    } finally { store.close(); }
+  } finally {
+    if (child.exitCode === null && !child.killed) { const exited = once(child, 'exit'); child.kill('SIGTERM'); await exited; }
+    await rm(dir, { recursive: true, force: true });
+  }
 });

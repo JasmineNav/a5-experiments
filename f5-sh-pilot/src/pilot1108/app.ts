@@ -15,6 +15,8 @@ export function createPilotApp(store: PilotStore, defaults: Partial<Config> = {}
     res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     const send = (status: number, body: unknown) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(body)); };
     try {
+      const host = new URL(`http://${req.headers.host ?? ''}`).hostname;
+      if (!['127.0.0.1', 'localhost'].includes(host)) { send(403, { error: '仅支持本机访问。' }); return; }
       const path = new URL(req.url ?? '/', 'http://localhost').pathname;
       if (req.headers['sec-fetch-site'] === 'cross-site' || (req.headers.origin && req.headers.origin !== `http://${req.headers.host}`)) {
         send(403, { error: '不接受跨站请求。' }); return;
