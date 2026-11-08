@@ -4,16 +4,16 @@
 
 ## 现场设备配置
 
-Windows存在 `.a5-local/device.json` 时，SH的启动与重启调用scripts/rayneo-control.mjs，检查绑定设备和USB授权后使用真机模式；失败不降级Mock。状态命令显示实际模式，只有显式选择9/mock才进入模拟。其他实验或未配置设备的环境使用通用启动。
+Windows SH/SL 的启动与重启调用 scripts/glasses-control.mjs，先打开后端和 Web，再整备 USB/无线；首次没有设备配置也不默认为 Mock。状态命令显示实际模式，只有显式选择9/mock才进入模拟。其他实验使用通用启动；静态真机环境未配置设备时仍先打开 Web 整备。
 
 在另一台Windows主机上准备：
 
 - 完整platform-tools放到 `.a5-local/android/platform-tools/`，优先使用其中adb.exe。
 - 完整scrcpy放到 `.a5-local/scrcpy/`，可执行文件、DLL和server文件保持齐全。
-- 创建device.json，最小配置为 `{"packageName":"link.ironip.a5.rayneo.localfix"}`，按实际安装包填写。单副已授权设备可自动保存serial；多设备须明确指定。
-- 已有工具可填写adbPath、scrcpyPath。显示端尚未安装时先按 [Android构建说明](../packages/a5-glasses/rayneo-display/BUILDING.md) 部署，或配置apkPath与apkSha256供启动脚本校验安装。
+- device.json 可选；显示端统一包名 `link.ironip.glasses.display`。单副已授权设备可自动保存 serial，多设备在 Web 中选择。
+- 已有工具可填写 adbPath、scrcpyPath；可用 apkPath 指定本地 APK，校验值始终取发布固定值。没有本地 APK 时自动下载 Release，不需要 Android 编译程序。
 
-工具和设备凭据不提交Git。修改路径或绑定后重启服务加载；换设备须先结束原会话。应用内守护、通知和硬件验收见 [RAYNEO.md](../f5-sh-pilot/RAYNEO.md)。SL与SH共用同一副眼镜和同一份设备配置：启动器对f5-sh-*、f5-sl-*都走设备启动链路，并向rayneo-control.mjs传 `--experiment`；SL默认端口5174，不读取device.json里的port（该项只对SH生效）。同一副眼镜同一时间只能绑定一个活跃会话，SH与SL不能同时做真机会话。
+工具和设备凭据不提交Git。修改路径或绑定后重启服务加载；换设备须先结束原会话。应用内守护、通知和硬件验收见 [RAYNEO.md](../f5-sh-pilot/RAYNEO.md)。SL与SH共用同一副眼镜和同一份设备配置：启动器对f5-sh-*、f5-sl-*都走设备启动链路，并向glasses-control.mjs传 `--experiment`；SL默认端口5174，不读取device.json里的port（该项只对SH生效）。同一副眼镜同一时间只能绑定一个活跃会话，SH与SL不能同时做真机会话。
 
 ## 新实验接入
 
@@ -49,3 +49,5 @@ entry相对实验目录，以当前Node版本运行。实验提供自己的start
 停止使用IPC正常关闭，不以taskkill强制结束数据库。最多等待45秒，以容纳展示结束和权限恢复；超时保留诊断，不假报成功。并发启动由锁保护，异常锁30秒后可恢复。
 
 `npm run test:launcher` 使用临时目录和独立端口，覆盖目录发现、后台/重复启动、跨菜单状态、端口冲突、遗留锁、USB启动配置、实际SH服务IPC和SQLite完整性。测试数量以命令输出为准，不写正式被试数据。Windows入口还需核对CRLF、UTF-8控制台、中文和空格路径；macOS入口可执行 `bash -n a5-experiments.command`。
+
+APK 不需要现场编译；版本与 SHA 固定在 scripts/display-release.mjs。支持 artifacts/ 手动打包，缺少才用 gh 或带环境 token 的 HTTPS 下载私有 Release。

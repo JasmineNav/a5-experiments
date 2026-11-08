@@ -51,3 +51,13 @@ SHA-256：`a47d9993827b6fff15fbf2347c7ca5d8fc71ed15e0dae74d5ac0f4106e848dff`
 没有实体眼镜/Windows 桌面验收。待验证：USB/adbd 切无线真实网络、断网/设备重启恢复、权限提示与语音助手读回、scrcpy 实际画面、左右眼渲染与隐藏时序、音调实际可听及电声延迟、Windows 首次/升级/无 ADB 启动流程。APK 新增传感器/相机/录音/TTS/振动等能力也仅完成编译/策略测试，运行时按实际硬件/权限报告。
 
 最终固定 2.2.1：2.2.0 通用能力增量后的正确性修补（keep-awake/兼容锁、亮度恢复、相机初始化清理）；旧标签全部保留。
+
+## 运行端只下载 APK
+
+运行端不需要 Android/JDK/Gradle。`scripts/glasses-control.mjs` 使用 `scripts/display-release.mjs` 的唯一版本/SHA 固定值：先查指定本地路径，再查仓库 `artifacts/glasses-display-2.2.1-debug.apk`，再用 `.a5-local/artifacts/` 缓存；均无文件才下载 Release。已有文件校验错误直接停止，不用下载替换来绕过。
+
+下载优先使用已登录的 `gh release download`。没有可用登录时，用普通 HTTPS 的 GitHub Release API；可通过 `GH_TOKEN` 或 `GITHUB_TOKEN` 提供有私有基座读取权限的 token。下载后及安装前都按已固定 SHA 校验，不从远端 SHA256SUMS 动态信任新值。
+
+A5 是公共仓库，基座是私有仓库：运行机器需要有权读取私有基座。常用做法是在该机器完成 `gh auth login`、`gh auth setup-git`，再 `git submodule update --init --recursive`；同一 gh 登录用于 Release 下载。仅设置 token 供 HTTPS 下载并不会自动配置 Git 子模块访问。
+
+离线/打包运行可手动把 APK 放进仓库 `artifacts/`，并随程序包带上已初始化的 `vendor/glasses-display/host`。这样运行机器既不用下载，也不用编译。把 APK 直接提交进公开 A5 确实更简单，但会让该二进制公开，并增加每次版本升级的仓库体积；本次没有擅自这样做。

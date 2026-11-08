@@ -21,7 +21,7 @@ test('首次无配置也进入真机 Web 整备；缺脚本或启动失败不能
     await writeFile(join(root, '.a5-local/device.json'), '{}');
     await assert.rejects(localDeviceControl(item, options), /未启动 Mock/);
     await mkdir(join(root, 'scripts'));
-    const entry = join(root, 'scripts/rayneo-control.mjs');
+    const entry = join(root, 'scripts/glasses-control.mjs');
     await writeFile(entry, `import {writeFile} from 'node:fs/promises'; await writeFile(new URL('../.a5-local/args.json',import.meta.url),JSON.stringify(process.argv.slice(2)));`);
     assert.equal(await localDeviceControl(item, options), entry);
     assert.equal(await localDeviceControl({ name: 'f5-sl-pilot' }, options), entry, 'SL与SH共用同一副眼镜的设备启动链路');

@@ -1,7 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import {displayRelease,apkName,obtainDisplayApk,verifyApk} from './display-release.mjs';
 import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -15,8 +15,7 @@ const experimentIndex = process.argv.indexOf('--experiment');
 const name = experimentIndex === -1 ? 'f5-sh-pilot' : process.argv[experimentIndex + 1];
 if (!/^f5-(sh|sl)-[a-z0-9-]+$/.test(name ?? '')) throw new Error('--experiment 必须是 f5-sh-* 或 f5-sl-* 实验目录名。');
 const pkg = 'link.ironip.glasses.display';
-const expectedVersion='2.2.1';
-const expectedSha='a47d9993827b6fff15fbf2347c7ca5d8fc71ed15e0dae74d5ac0f4106e848dff';
+const expectedVersion=displayRelease.version;
 const configPath = join(local, 'device.json');
 const action = process.argv[2] ?? 'start';
 const noOpen = process.argv.includes('--no-open');
@@ -71,8 +70,7 @@ async function device() {
   try { await execute(localScrcpy, ['--version'], { cwd: root, windowsHide: true, timeout: 5000 }); scrcpyPath = localScrcpy; } catch {}
   return { connected:true,adb, serial, port: requestedPort ?? (name === 'f5-sh-pilot' ? config.port ?? 5173 : undefined), packageName, scrcpyPath,
     activityName: `${packageName}/link.ironip.glasses.display.MainActivity`,
-    apkPath: config.packageName===pkg&&config.apkPath?config.apkPath:join(local,'artifacts','glasses-display-2.2.1-debug.apk'),
-    apkSha256:config.packageName===pkg&&config.apkSha256?config.apkSha256:expectedSha };
+    apkPath: config.packageName===pkg&&config.apkPath?config.apkPath:join(root,'artifacts',apkName()) };
 }
 async function health(port) {
   const response = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(2000) });
@@ -153,11 +151,11 @@ try {
         const installed=await runAdb(target.adb,['-s',target.serial,'shell','dumpsys','package',pkg]);
         const version=/versionName=(\S+)/.exec(installed)?.[1];
         if(version!==expectedVersion){
-          const sha=createHash('sha256').update(await readFile(target.apkPath)).digest('hex');
-          if(sha!==target.apkSha256)throw new Error('共享显示端 APK SHA-256 不符，未安装。');
+          const apkPath=await obtainDisplayApk({root,localPath:target.apkPath});
+          await verifyApk(apkPath);
           const value=await health(status.port);
           if(value.adapter.busy)throw new Error('眼镜仍有展示，暂不更新 APK。');
-          const result=await runAdb(target.adb,['-s',target.serial,'install','-r',target.apkPath]);
+          const result=await runAdb(target.adb,['-s',target.serial,'install','-r',apkPath]);
           if(!result.includes('Success'))throw new Error('APK 安装失败；不要卸载或清除账本数据。');
           const after=await runAdb(target.adb,['-s',target.serial,'shell','dumpsys','package',pkg]);
           if(!after.includes(`versionName=${expectedVersion}`))throw new Error('安装后版本核对失败。');
