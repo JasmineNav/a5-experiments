@@ -1,4 +1,4 @@
-import { feeFilled, planSelection, filledState } from '../../public/pilot1108/rules.js';
+import { feeFilled, planSelection, filledState, taskProgress } from '../../public/pilot1108/rules.js';
 /** 11-08 材料可行性 pilot；不加载正式 SH 状态机或眼镜适配器。 */
 export const PLANS = ['A', 'B', 'C', 'D'] as const;
 export const FIELDS = ['qualified', ...PLANS] as const;
@@ -13,22 +13,51 @@ export interface Config {
 export interface Task {
   id: string; title: string; practice: boolean; feedback: boolean;
   maxCost: number; maxDays: number; minPeople: number;
+  extraMultiplier?: number; scratchpad?: boolean; scenarioPage?: boolean; transcriptionDelayMs?: number;
+  presentation?: 'cards'; completionFeedback?: boolean; submissionPage?: boolean;
+  taskProgress?: 'none' | 'substeps-v1';
+  taskHeader?: 'hidden';
+  requirements?: { context: string; premise: string; cost: string; time: string; capacity: string };
+  tableHeaders?: string[]; confirmationTitle?: string;
   rows: { plan: typeof PLANS[number]; base: number; extra: number; days: number; people: number }[];
 }
 const rows = (values: number[][]): Task['rows'] => values.map((v, i) => ({ plan: PLANS[i], base: v[0], extra: v[1], days: v[2], people: v[3] }));
 export const PRACTICE: Task = {
   id: 'practice', title: '展台布置方案（练习）', practice: true, feedback: false,
   maxCost: 2, maxDays: 5, minPeople: 16,
+  presentation: 'cards', scratchpad: true, confirmationTitle: '确认并提交展台布置方案',
+  taskProgress: 'none', taskHeader: 'hidden', submissionPage: true,
+  requirements: { context: '你今天要筛选展台布置方案。', premise: '你今天要筛选展台布置方案。',
+    cost: '总费用≤2万元（总费用＝基本报价＋其他费用）', time: '筹备时间≤5天', capacity: '每场接待≥16人' },
   rows: rows([[1.2, .3, 4, 20], [1.8, .3, 4, 18], [1.3, .4, 4, 14], [1.4, .5, 5, 16]]),
 };
 export const NO_FEEDBACK: Task = {
   id: 'SH01-no-feedback', title: '筛选活动执行方案', practice: false, feedback: false,
   maxCost: 17, maxDays: 10, minPeople: 24,
-  rows: rows([[14.68, 2.39, 9, 28], [13.72, 3.25, 10, 24], [15.73, 1.26, 8, 22], [14.21, 2.74, 10, 30]]),
+  extraMultiplier: 3, scratchpad: true, scenarioPage: true, transcriptionDelayMs: 2000,
+  presentation: 'cards', completionFeedback: false, submissionPage: true,
+  taskProgress: 'none',
+  requirements: {
+    context: '你今天要筛选活动执行方案，活动共有3场。今天13:00—13:45要和同事交接活动资料，14:00还要参加线上评审会。',
+    premise: '你今天要筛选活动执行方案，活动共有3场，因此需要收3次的执行费用。',
+    cost: '三场活动总费用≤17万元（总费用＝基本报价＋单场执行费×3）',
+    time: '筹备时间≤10天', capacity: '每场接待人数≥24人',
+  },
+  tableHeaders: ['基本报价（万元）', '单场执行费用（万元）', '筹备时间（天）', '每场接待人数（人）'],
+  rows: rows([[13.17, 1.29, 9, 28], [13.28, 1.23, 10, 24], [12.94, 1.35, 8, 22], [13.47, 1.16, 10, 30]]),
 };
 export const WITH_FEEDBACK: Task = {
-  ...NO_FEEDBACK, id: 'SH01-feedback', feedback: true,
-  rows: rows([[15.24, 1.88, 9, 28], [12.87, 4.11, 10, 24], [13.08, 3.85, 10, 30], [14.15, 2.73, 8, 22]]),
+  ...NO_FEEDBACK, id: 'SH01-feedback', title: '筛选设备租赁方案', feedback: true,
+  taskProgress: 'substeps-v1',
+  requirements: {
+    context: '你需要为体验展厅选择设备租赁方案，租期为3个月。今天13:00—13:45要和同事交接活动资料，14:00还要参加线上评审会。',
+    premise: '你需要为体验展厅选择设备租赁方案，租期为3个月，每个月都需要收一次维护费。',
+    cost: '三个月总费用不超过17万元（总费用＝基础租赁费＋每月维护费×3）',
+    time: '设备交付时间不超过10天', capacity: '可提供的设备不少于24台',
+  },
+  tableHeaders: ['基本报价（万元）', '每月维护费用（万元）', '设备交付时间（天）', '可提供设备（台）'],
+  confirmationTitle: '确认设备租赁方案',
+  rows: rows([[13.58, 1.18, 9, 28], [13.59, 1.13, 10, 24], [12.82, 1.37, 10, 30], [13.46, 1.14, 8, 22]]),
 };
 export function configuration(participant: string, input: Partial<Config> = {}): Config {
   const n = Number(participant.match(/(\d+)$/)?.[1]);
@@ -37,7 +66,7 @@ export function configuration(participant: string, input: Partial<Config> = {}):
   const config = { feedback: 'progress', source: 'participant', practiceScales: false, practiceFeedback: false, ...input, order };
   if (config.feedback !== 'progress' || config.source !== 'participant' ||
       !['no-feedback-first', 'feedback-first'].includes(config.order!) || config.practiceScales !== false || config.practiceFeedback !== false) {
-    throw new Error('本版固定五节点进度、誊写本人答案、练习无量表无反馈；顺序须有效，无数字编号时请显式指定。');
+    throw new Error('本版固定誊写本人答案、练习无量表；顺序须有效，无数字编号时请显式指定。');
   }
   return config as Config;
 }
@@ -46,7 +75,8 @@ export function taskSequence(config: Config): Task[] {
   return structuredClone([PRACTICE, ...formal]);
 }
 export function standard(task: Task): Answers {
-  const costs = Object.fromEntries(task.rows.map(r => [r.plan, ((Math.round(r.base * 100) + Math.round(r.extra * 100)) / 100).toFixed(2)]));
+  // 旧快照和练习未声明倍数时继续按一次费用计算；以整数分计算避免浮点边界。
+  const costs = Object.fromEntries(task.rows.map(r => [r.plan, ((Math.round(r.base * 100) + Math.round(r.extra * 100) * (task.extraMultiplier ?? 1)) / 100).toFixed(2)]));
   return { ...costs, qualified: task.rows.filter(r => Number(costs[r.plan]) <= task.maxCost && r.days <= task.maxDays && r.people >= task.minPeople).map(r => r.plan).join('、') } as Answers;
 }
 export const emptyAnswers = (): Answers => ({ qualified: '', A: '', B: '', C: '', D: '' });
@@ -60,7 +90,7 @@ export function score(actual: Answers, expected: Answers) {
   return { fields, correct: Object.values(fields).filter(Boolean).length, denominator: FIELDS.length,
     accuracy: Object.values(fields).filter(Boolean).length / FIELDS.length };
 }
-export type Stage = 'requirements' | 'compute' | 'transcribe' | 'ratings' | 'done';
+export type Stage = 'scenario' | 'requirements' | 'compute' | 'loading' | 'transcribe' | 'submitted' | 'ratings' | 'done';
 export type Ratings = Record<string, number>;
 export const SCALE_ITEMS = [
   { key: 'mental', label: '心理需求', question: '完成这一阶段，您需要花多大程度的心力来思考和处理信息？' },
@@ -70,23 +100,31 @@ export const SCALE_ITEMS = [
 ];
 export interface Trial {
   task: Task; compute: Answers; transcription: Answers; source: Answers | null;
+  scratchpad?: string;
+  requirements_started_ms?: number | null;
+  transcription_due_ms?: number | null;
   started_ms: number; first_compute_ms: number | null; step1_end_ms: number | null;
   step2_start_ms: number | null; step2_end_ms: number | null;
   t0_ms: number | null; t0_20s_ms: number | null; t1_ms: number | null; t2_ms: number | null;
   scale1: Ratings | null; scale2: Ratings | null;
 }
 export interface State {
-  schema_version: 2; material_version: 'sh-pilot-2026-11-08-r2'; id: string; participant: string; config: Config;
+  schema_version: 2; material_version: 'sh-pilot-2026-11-08-r2' | 'sh-pilot-2026-11-08-r3' | 'sh-pilot-2026-11-08-r4' | 'sh-pilot-2026-11-08-r5' | 'sh-pilot-2026-11-08-r6' | 'sh-pilot-2026-11-08-r7' | 'sh-pilot-2026-11-09-r8' | 'sh-pilot-2026-11-09-r9' | 'sh-pilot-2026-11-09-r10'; id: string; participant: string; config: Config;
   trials: Trial[]; index: number; stage: Stage; revision: number; elapsed_ms: number; created_at: string;
+  deleted?: { deleted_at: string; reason: string };
 }
-export type Action = { type: 'compute' | 'requirements' | 'next' } |
-  { type: 'input'; field: Field; value: string } | { type: 'ratings'; values: { phase1: Ratings; phase2: Ratings } };
+export type Action = { type: 'compute' | 'requirements' | 'next' | 'transcribe' | 'continue' } |
+  { type: 'input'; field: Field; value: string } | { type: 'scratchpad'; value: string } |
+  { type: 'ratings'; values: { phase1: Ratings; phase2: Ratings } };
 export interface Event { type: string; elapsed_ms: number; task_id: string; stage?: Stage; data: unknown }
 export function initial(id: string, participant: string, config: Config, at: string): State {
   if (!/^[A-Za-z0-9_-]{1,40}$/.test(participant)) throw new Error('被试编号仅允许1—40位字母、数字、下划线或连字符。');
-  return { schema_version: 2, material_version: 'sh-pilot-2026-11-08-r2', id, participant, config, created_at: at,
+  return { schema_version: 2, material_version: 'sh-pilot-2026-11-09-r10', id, participant, config, created_at: at,
     index: 0, stage: 'requirements', revision: 0, elapsed_ms: 0,
     trials: taskSequence(config).map(task => ({ task, compute: emptyAnswers(), transcription: emptyAnswers(), source: null,
+      ...(task.scratchpad ? { scratchpad: '' } : {}),
+      ...(task.scenarioPage ? { requirements_started_ms: null } : {}),
+      ...(task.transcriptionDelayMs ? { transcription_due_ms: null } : {}),
       started_ms: 0, first_compute_ms: null, step1_end_ms: null, step2_start_ms: null, step2_end_ms: null,
       t0_ms: null, t0_20s_ms: null, t1_ms: null, t2_ms: null, scale1: null, scale2: null })) };
 }
@@ -105,13 +143,20 @@ export function transition(previous: State, action: Action, now: number): { stat
   const state = structuredClone(previous);
   if (state.stage === 'done') throw new Error('会话已完成。');
   const t = state.trials[state.index];
+  const progressBefore = t.task.taskProgress === 'substeps-v1' ? progressView(state) : null;
   const events = marker(state, now);
   const emit = (type: string, data: unknown = {}) => events.push({ type, elapsed_ms: now, task_id: t.task.id, stage: state.stage, data });
   const startTranscription = () => { state.stage = 'transcribe'; t.step2_start_ms = now; emit('phase2_started'); };
-  if (action.type === 'compute' && state.stage === 'requirements') {
+  if (action.type === 'requirements' && state.stage === 'scenario') {
+    state.stage = 'requirements'; t.requirements_started_ms = now; emit('requirements_opened');
+  } else if (action.type === 'compute' && state.stage === 'requirements') {
     state.stage = 'compute'; t.first_compute_ms ??= now; emit('compute_opened');
   } else if (action.type === 'requirements' && state.stage === 'compute') {
     state.stage = 'requirements'; emit('requirements_revisited');
+  } else if (action.type === 'scratchpad' && state.stage === 'compute' && t.task.scratchpad) {
+    if (typeof action.value !== 'string' || action.value.length > 5000) throw new Error('草稿本最多可输入5000个字符。');
+    const previous = t.scratchpad ?? ''; t.scratchpad = action.value;
+    emit('scratchpad_changed', { previous, value: action.value });
   } else if (action.type === 'input' && ['compute', 'transcribe'].includes(state.stage)) {
     if (!FIELDS.includes(action.field) || typeof action.value !== 'string' || action.value.length > 100) throw new Error('输入字段或长度无效。');
     const answers = state.stage === 'compute' ? t.compute : t.transcription;
@@ -123,7 +168,7 @@ export function transition(previous: State, action: Action, now: number): { stat
     if (state.stage === 'transcribe' && action.field === 'B' && action.value.trim() && t.t2_ms === null) {
       t.t2_ms = now; emit('t2_candidate', { rule: 'first_B_transcription_input', actual_interruption: false });
     }
-    if (state.stage === 'transcribe' && t.task.feedback) emit('completion_feedback_state', { feedback: state.config.feedback,
+    if (state.stage === 'transcribe' && t.task.feedback && t.task.completionFeedback !== false) emit('completion_feedback_state', { feedback: state.config.feedback,
       filled: filledState(answers), completed: Object.values(filledState(answers)).filter(Boolean).length,
       means_correct: false });
   } else if (action.type === 'next' && state.stage === 'compute') {
@@ -132,11 +177,22 @@ export function transition(previous: State, action: Action, now: number): { stat
     t.source = structuredClone(t.compute);
     emit('phase1_submitted', { participant_answers: t.compute, standard_answers: standard(t.task), source: t.source, source_mode: state.config.source, score: score(t.compute, standard(t.task)) });
     emit('t1_candidate', { rule: 'phase1_next_clicked', actual_interruption: false });
+    if (!t.task.practice && t.task.transcriptionDelayMs) {
+      state.stage = 'loading'; t.transcription_due_ms = now + t.task.transcriptionDelayMs;
+      emit('transcription_loading_started', { duration_ms: t.task.transcriptionDelayMs });
+    } else startTranscription();
+  } else if (action.type === 'transcribe' && state.stage === 'loading') {
+    if (t.transcription_due_ms == null || now < t.transcription_due_ms) throw new Error('加载尚未结束，请稍候。');
+    emit('transcription_loading_finished', { actual_duration_ms: now - t.step1_end_ms! });
     startTranscription();
   } else if (action.type === 'next' && state.stage === 'transcribe') {
     if (!complete(t.transcription)) throw new Error('请填写全部登记结果（费用必须两位小数，方案编号可用顿号分隔）。');
     t.step2_end_ms = now;
     emit('phase2_submitted', { answers: t.transcription, objective_score: score(t.transcription, standard(t.task)), copy_score: score(t.transcription, t.source!) });
+    if (t.task.submissionPage) { state.stage = 'submitted'; emit('submission_success_opened'); }
+    else if (t.task.practice) finish();
+    else { state.stage = 'ratings'; emit('questionnaire_opened', { timing: 'after_compute_and_transcription' }); }
+  } else if (action.type === 'continue' && state.stage === 'submitted') {
     if (t.task.practice) finish();
     else { state.stage = 'ratings'; emit('questionnaire_opened', { timing: 'after_compute_and_transcription' }); }
   } else if (action.type === 'ratings' && state.stage === 'ratings') {
@@ -150,10 +206,22 @@ export function transition(previous: State, action: Action, now: number): { stat
     emit('phase2_ratings', { ...t.scale2, timing: 'post_task_retrospective' });
     finish();
   } else throw new Error('当前页面不允许此操作。');
+  if (progressBefore) {
+    // 切换试次时仍记录刚刚完成的试次，不把新试次的0%记到旧试次。
+    const progressAfter = state.index !== previous.index ? taskProgress('submitted', t.transcription) : progressView(state);
+    if (progressAfter && (progressBefore.value !== progressAfter.value || JSON.stringify(progressBefore.filled) !== JSON.stringify(progressAfter.filled))) {
+      events.push({ type: 'task_progress_state', elapsed_ms: now, task_id: t.task.id, stage: state.index !== previous.index ? 'submitted' : state.stage,
+        data: { ...progressAfter, evidence: 'server_accepted_format_state' } });
+    }
+  }
   function finish() {
     emit('trial_finished', summary(t));
     if (state.index === state.trials.length - 1) { state.stage = 'done'; emit('session_finished'); }
-    else { state.index++; state.stage = 'requirements'; state.trials[state.index].started_ms = now; }
+    else {
+      const next = state.trials[++state.index]; next.started_ms = now;
+      state.stage = next.task.scenarioPage ? 'scenario' : 'requirements';
+      if (state.stage === 'scenario') events.push({ type: 'scenario_opened', elapsed_ms: now, task_id: next.task.id, stage: 'scenario', data: { actual_interruption: false } });
+    }
   }
   state.elapsed_ms = now; state.revision++;
   return { state, events };
@@ -162,6 +230,13 @@ export function summary(t: Trial) {
   const step1_ms = t.step1_end_ms === null ? null : t.step1_end_ms - t.started_ms;
   const step2_ms = t.step2_end_ms === null || t.step2_start_ms === null ? null : t.step2_end_ms - t.step2_start_ms;
   return { task_id: t.task.id, feedback: t.task.feedback, step1_ms, step2_ms,
+    ...(t.task.taskProgress ? { task_progress_mode: t.task.taskProgress } : {}),
+    ...(t.task.completionFeedback !== undefined ? { completion_feedback_enabled: t.task.feedback && t.task.completionFeedback } : {}),
+    ...(t.task.transcriptionDelayMs ? { loading_target_ms: t.task.transcriptionDelayMs,
+      loading_actual_ms: t.step1_end_ms === null || t.step2_start_ms === null ? null : t.step2_start_ms - t.step1_end_ms } : {}),
+    ...(t.task.scenarioPage ? { requirements_started_ms: t.requirements_started_ms ?? null,
+      scenario_reading_ms: t.requirements_started_ms == null ? null : t.requirements_started_ms - t.started_ms } : {}),
+    ...(t.task.scratchpad ? { scratchpad: t.scratchpad ?? '' } : {}),
     compute_from_first_open_ms: t.step1_end_ms === null || t.first_compute_ms === null ? null : t.step1_end_ms - t.first_compute_ms,
     total_active_ms: step1_ms === null || step2_ms === null ? null : step1_ms + step2_ms,
     task_wall_elapsed_ms: t.step2_end_ms === null ? null : t.step2_end_ms - t.started_ms,
@@ -172,13 +247,20 @@ export function summary(t: Trial) {
     ratings_timing: 'post_task_retrospective', scale1: t.scale1, scale2: t.scale2 };
 }
 /** 公开视图不泄露标准答案/正确率；界面3固定返回被试本人刚才的计算输入。 */
+function progressView(state: State) {
+  const t = state.trials[state.index];
+  return t.task.taskProgress === 'substeps-v1' ? taskProgress(state.stage, state.stage === 'transcribe' ? t.transcription : t.compute) : null;
+}
 export function view(state: State) {
   const t = state.trials[state.index];
   return { id: state.id, participant: state.participant, stage: state.stage, revision: state.revision,
+    ...(state.stage === 'loading' ? { loading_remaining_ms: Math.max(0, (t.transcription_due_ms ?? state.elapsed_ms) - state.elapsed_ms) } : {}),
     trial_number: state.index + 1, task_count: state.trials.length, task: t.task,
-    feedback: state.stage === 'transcribe' && t.task.feedback ? 'progress' as const : null,
+    feedback: state.stage === 'transcribe' && t.task.feedback && t.task.completionFeedback !== false ? 'progress' as const : null,
+    ...(t.task.taskProgress ? { task_progress: progressView(state) } : {}),
     answers: state.stage === 'transcribe' ? t.transcription : t.compute,
     source: state.stage === 'transcribe' ? t.source : null,
+    ...(t.task.scratchpad ? { scratchpad: t.scratchpad ?? '' } : {}),
     scale_phases: [
       { key: 'phase1', label: '第一阶段：读要求、算费用、选方案', items: SCALE_ITEMS.map(i => ({ ...i, question: i.key === 'relaxation' ? '回想刚才读要求、计算和筛选方案的过程中，您心里有多放松？' : i.question })) },
       { key: 'phase2', label: '第二阶段：照着结果填写', items: SCALE_ITEMS.map(i => ({ ...i, question: i.key === 'relaxation' ? '回想刚刚在记录最终答案的过程中，您心里有多放松？' : i.question })) },

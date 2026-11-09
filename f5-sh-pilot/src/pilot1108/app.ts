@@ -40,7 +40,7 @@ export function createPilotApp(store: PilotStore, defaults: Partial<Config> = {}
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('请求格式无效。');
         body = parsed as Record<string, unknown>;
       }
-      if (path === '/api/sessions' && req.method === 'GET') { send(200, { sessions: store.list(), defaults }); return; }
+      if (path === '/api/sessions' && req.method === 'GET') { send(200, { sessions: store.list(), deleted_sessions: store.list(true), defaults }); return; }
       if (path === '/api/sessions' && req.method === 'POST') {
         const input = body.config;
         if (input !== undefined && (!input || typeof input !== 'object' || Array.isArray(input))) throw new Error('配置格式无效。');
@@ -48,10 +48,12 @@ export function createPilotApp(store: PilotStore, defaults: Partial<Config> = {}
         if (input && Object.keys(input).some(k => !permitted.includes(k))) throw new Error('配置包含未知字段。');
         send(201, store.create(body.participant as string, { ...defaults, ...input as Partial<Config> })); return;
       }
-      const match = path.match(/^\/api\/sessions\/([a-f0-9-]+)(?:\/(command|export))?$/);
+      const match = path.match(/^\/api\/sessions\/([a-f0-9-]+)(?:\/(command|export|restore))?$/);
       if (match) {
         const [, id, op] = match;
         if (!op && req.method === 'GET') { send(200, view(store.get(id))); return; }
+        if (!op && req.method === 'DELETE') { store.delete(id); send(200, { deleted: true, recoverable: true }); return; }
+        if (op === 'restore' && req.method === 'POST') { store.restore(id); send(200, { restored: true }); return; }
         if (op === 'command' && req.method === 'POST') {
           if (!body.action || typeof body.action !== 'object' || Array.isArray(body.action)) throw new Error('操作格式无效。');
           send(200, store.command(id, body.command_id as string, body.revision as number, body.action as Action)); return;

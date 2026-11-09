@@ -13,3 +13,12 @@ export function planSelection(value) {
 export function filledState(answers) {
   return Object.fromEntries(fields.map(field => [field, field === 'qualified' ? planSelection(answers[field]) !== null : feeFilled(answers[field])]));
 }
+/** 两段进度分别分配50%；提交段为五项填写及最终提交保留六个子步骤。 */
+export function taskProgress(stage, answers) {
+  const filled = filledState(answers), completed = Object.values(filled).filter(Boolean).length;
+  const submitted = ['submitted', 'ratings', 'done'].includes(stage);
+  const phase2 = stage === 'transcribe';
+  const value = submitted ? 100 : phase2 ? 50 + completed * 50 / 6
+    : stage === 'loading' ? 50 : stage === 'scenario' ? 0 : completed * 10;
+  return { mode: 'substeps-v1', value, filled, completed, submitted, means_correct: false };
+}

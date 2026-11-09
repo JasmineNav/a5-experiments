@@ -14,8 +14,12 @@ export class PilotStore {
   private clock: Clock;
   constructor(path: string, clock: Clock = systemClock) {
     this.clock = clock; this.shared = new Store<State, PilotSnapshot>(path); this.db = this.shared.db;
-    this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS pilot_participant ON sessions(json_extract(state,'$.participant'));
-      CREATE TABLE IF NOT EXISTS pilot_command_responses(session_id TEXT NOT NULL REFERENCES sessions(id), command_id TEXT NOT NULL, response TEXT NOT NULL, PRIMARY KEY(session_id,command_id));
+    this.shared.tx(() => {
+      const index = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name='pilot_participant'").get() as { sql: string } | undefined;
+      if (index && !/\bWHERE\b/i.test(index.sql)) this.db.exec('DROP INDEX pilot_participant');
+      this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS pilot_participant ON sessions(json_extract(state,'$.participant')) WHERE json_extract(state,'$.deleted') IS NULL");
+    });
+    this.db.exec(`CREATE TABLE IF NOT EXISTS pilot_command_responses(session_id TEXT NOT NULL REFERENCES sessions(id), command_id TEXT NOT NULL, response TEXT NOT NULL, PRIMARY KEY(session_id,command_id));
       CREATE TRIGGER IF NOT EXISTS pilot_responses_no_update BEFORE UPDATE ON pilot_command_responses BEGIN SELECT RAISE(ABORT,'pilot响应只允许追加'); END;
       CREATE TRIGGER IF NOT EXISTS pilot_responses_no_delete BEFORE DELETE ON pilot_command_responses BEGIN SELECT RAISE(ABORT,'pilot响应只允许追加'); END;`);
     if (this.shared.ids().some(id => this.get(id).schema_version !== 2)) {
@@ -31,24 +35,52 @@ export class PilotStore {
   }
   private wall() { return new Date(this.clock.wall()).toISOString(); }
   private append(state: State, events: Event[]) {
-    for (const event of events) this.shared.event({ event_id: randomUUID(), session_id: state.id,
+    for (const event of events) {
+      const task = state.trials.find(t => t.task.id === event.task_id)?.task;
+      this.shared.event({ event_id: randomUUID(), session_id: state.id,
       participant_id: state.participant, stage_id: event.task_id, unit_id: event.stage ?? null,
-      condition: state.trials.find(t => t.task.id === event.task_id)?.task.feedback ? state.config.feedback : 'no-feedback',
+      condition: task?.taskProgress === 'substeps-v1' ? 'task-progress' : task?.taskProgress === 'none' ? 'no-feedback'
+        : task?.feedback && task.completionFeedback !== false ? state.config.feedback : 'no-feedback',
       event_type: event.type, elapsed_ms: event.elapsed_ms, timestamp_iso: this.wall(),
       payload: event.data as Record<string, unknown>, content_version: state.material_version,
       data_kind: event.task_id === 'practice' ? 'pilot1108-practice' : 'pilot1108' });
+    }
   }
   private now(id: string, last: number) { const clock = this.clocks.get(id)!; return Math.max(last, this.clock.mono() - clock.base + clock.offset); }
-  get(id: string): State {
+  get(id: string, includeDeleted = false): State {
     const session = this.shared.get(id);
     if (!session) throw new Error('找不到会话。');
+    if (session.state.deleted && !includeDeleted) throw new Error('此记录已删除，请先在主试首页恢复记录。');
     return session.state;
   }
-  list() {
-    return this.shared.ids().reverse().map(id => {
-      const s = this.get(id);
-      return { id, participant: s.participant, stage: s.stage, created_at: s.created_at, config: s.config };
+  list(deleted = false) {
+    return (deleted ? this.shared.deletedIds() : this.shared.ids()).reverse().map(id => {
+      const s = this.get(id, true);
+      return { id, participant: s.participant, stage: s.stage, created_at: s.created_at, config: s.config, deleted_at: s.deleted?.deleted_at ?? null };
     });
+  }
+  /** 首页删除仅标记状态，原始事件、作答、快照和状态历史全部保留。 */
+  delete(id: string) {
+    this.shared.tx(() => {
+      const session = this.shared.get(id); if (!session) throw new Error('找不到会话。');
+      const state = session.state; if (state.deleted) return;
+      if (state.stage !== 'done') state.elapsed_ms = this.now(id, state.elapsed_ms);
+      state.revision++;
+      state.deleted = { deleted_at: this.wall(), reason: '主试首页删除' };
+      this.shared.save(session);
+      this.append(state, [{ type: 'session_deleted', elapsed_ms: state.elapsed_ms, task_id: state.trials[state.index].task.id, stage: state.stage, data: { recoverable: true } }]);
+    });
+  }
+  restore(id: string) {
+    const elapsed = this.shared.tx(() => {
+      const session = this.shared.get(id); if (!session) throw new Error('找不到会话。');
+      const state = session.state; if (!state.deleted) return null;
+      if (this.list().some(s => s.participant === state.participant)) throw new Error('此编号已有另一条未删除记录，请先删除另一条记录再恢复。');
+      delete state.deleted; state.revision++; this.shared.save(session);
+      this.append(state, [{ type: 'session_restored', elapsed_ms: state.elapsed_ms, task_id: state.trials[state.index].task.id, stage: state.stage, data: { deleted_interval_excluded: true } }]);
+      return state.elapsed_ms;
+    });
+    if (elapsed !== null) this.clocks.set(id, { base: this.clock.mono(), offset: elapsed });
   }
   create(participant: string, input: Partial<Config>) {
     if (typeof participant !== 'string') throw new Error('请填写被试编号。');
@@ -68,14 +100,15 @@ export class PilotStore {
     if (typeof commandId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(commandId)) throw new Error('命令编号无效。');
     const fingerprint = JSON.stringify({ revision, action });
     return this.shared.tx(() => {
+      const session = this.shared.get(id);
+      if (!session) throw new Error('找不到会话。');
+      if (session.state.deleted) throw new Error('此记录已删除，请先在主试首页恢复记录。');
       const duplicate = this.shared.command(id, commandId);
       if (duplicate) {
         if (duplicate !== fingerprint) throw new Error('命令编号已用于不同操作。');
         const cached = this.db.prepare('SELECT response FROM pilot_command_responses WHERE session_id=? AND command_id=?').get(id, commandId)!;
         return JSON.parse(String(cached.response)) as ReturnType<typeof view>;
       }
-      const session = this.shared.get(id);
-      if (!session) throw new Error('找不到会话。');
       if (revision !== session.state.revision) throw new Error('页面已过期，请刷新后继续（请勿同时打开多个作答窗口）。');
       const result = transition(session.state, action, this.now(id, session.state.elapsed_ms));
       session.state = result.state; this.shared.save(session); this.append(result.state, result.events);
@@ -96,7 +129,7 @@ export class PilotStore {
     });
   }
   export(id: string) {
-    const state = this.get(id);
+    const state = this.get(id, true);
     const events = this.shared.events(id).map(e => ({ ...e, type: e.event_type, task_id: e.stage_id, data: e.payload, server_received_at: e.timestamp_iso }));
     return { exported_at: this.wall(), clock: '公共Clock单调时钟毫秒；重启停机时间不计入，server_restarted标记不连续；received_at为带时区墙钟',
       actual_interruption: false, scales: SCALE_ITEMS, state, trials: state.trials.map(summary), events,
