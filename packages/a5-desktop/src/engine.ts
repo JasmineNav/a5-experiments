@@ -4,6 +4,7 @@ import type { EventRecord, Intervention, Session, Phase, T0State } from './store
 import { hash, InputError, itemResults, normalize, score } from './tasks.ts';
 import type { DataTable, Field, Snapshot, Unit } from './tasks.ts';
 import type { Condition, DisplayMode, GlassesAdapter, GlassesEvent, GlassesReceipt, Participant, ParticipantConfig } from './contracts.ts';
+import { PreSendError, sendErrorDelivery } from '@a5/glasses/contracts.ts';
 import { profile, stageIds } from './profile.ts';
 import { validateConfig } from './config.ts';
 import { systemClock } from './clock.ts';
@@ -27,6 +28,10 @@ const DEBUG_PARTICIPANT: Participant = {
   stages: stageIds.map((stage_id, i) => ({ stage_id, condition: DEBUG_CONDITIONS[i][0], message_id: DEBUG_CONDITIONS[i][1] })),
 };
 type Timing = 'T0' | 'T1' | 'T2';
+/** 适配器发送上限；超时后中止尚未写入的调用，已写入的按 unacknowledged，不补发。 */
+export const SEND_TIMEOUT_MS = 5000, SEND_ABORT_GRACE_MS = 250, SEND_TIMEOUT = 'adapter_send_timeout_unacknowledged';
+/** 确定没有显示的投递结果：不占用显示，也不阻塞下一条。 */
+const NOT_DISPLAYED = ['failed', 'not_sent'];
 const ACTIVE_REST = ['requested', 'resting'];
 
 export class Engine {
@@ -35,7 +40,7 @@ export class Engine {
   private messageMode(s: Session, m: Intervention): DisplayMode { return m.display_mode ?? s.snapshot.participant.stages.find(a => a.stage_id === m.stage_id)?.display_mode ?? s.snapshot.display_mode ?? 'legacy_8500'; }
   private sessionModes(s: Session): DisplayMode[] { return [...new Set(s.snapshot.participant.stages.filter(a => a.condition !== 'NONE').map(a => a.display_mode ?? s.snapshot.display_mode ?? 'legacy_8500'))]; }
   private pendingConfirmation(s: Session) {
-    return this.store.interventions(s.id).find(m => this.messageMode(s, m) === 'confirm_until_ack' && (m.source === 'device'
+    return this.store.interventions(s.id).find(m => this.messageMode(s, m) === 'confirm_until_ack' && m.status !== 'not_sent' && (m.source === 'device'
       ? !m.device_events?.some(e => e.kind === 'hidden')
       : m.confirmation_status !== 'accepted'));
   }
@@ -55,7 +60,7 @@ export class Engine {
     throw new HttpError(409,`当前眼镜显示端（${device.device_info?.app_version??'未知版本'}）不支持${durationMs/1000}秒固定时长，请更新显示端 APK。`);
   }
   private requirePreviousMessageFinished(s: Session) {
-    if (this.store.interventions(s.id).some(m => m.data_kind === 'manual' && m.display_mode !== 'confirm_until_ack' && m.status !== 'failed' && (m.source === 'device' ? !m.device_events?.some(e => e.kind === 'hidden') : !!m.t_send && this.wallNow()-Date.parse(m.t_send)<m.duration_ms))) throw new HttpError(409, '手动通知仍在显示，请等待后再触发下一条。');
+    if (this.store.interventions(s.id).some(m => m.data_kind === 'manual' && m.display_mode !== 'confirm_until_ack' && !NOT_DISPLAYED.includes(m.status) && (m.source === 'device' ? !m.device_events?.some(e => e.kind === 'hidden') : !!m.t_send && this.wallNow()-Date.parse(m.t_send)<m.duration_ms))) throw new HttpError(409, '手动通知仍在显示，请等待后再触发下一条。');
     if (this.pendingConfirmation(s)) throw new HttpError(409, '请先确认上一条眼镜消息，并等待眼镜消失回执，再触发下一条消息。');
   }
   private deviceUnavailable(s: Session) {
@@ -145,6 +150,8 @@ export class Engine {
   readonly store: Store;
   readonly adapter: GlassesAdapter;
   readonly material: Material;
+  /** 服务启动时注入：返回本次运行的版本坐标，建会话时写入快照与 session_created。 */
+  runVersions?: () => Record<string, unknown>;
   /** 注入的统一时间源；设备控制与 HTTP 层共用，测试可整体替换。 */
   readonly clock: Clock;
   private readonly wallNow: () => number;
@@ -231,7 +238,8 @@ export class Engine {
       if (this.store.ids().some(id => { const existing = this.session(id); return existing.state.status === 'active' && existing.state.device_id === device.device_id; })) throw new HttpError(409, '此眼镜已绑定一个进行中的会话，请先结束该会话。');
     }
     const token = randomBytes(32).toString('hex');
-    const snapshot: Snapshot = structuredClone({ ...this.material, display_mode: mode as DisplayMode, participant, config_hash: hash(participant), content_hash: hash(this.material) });
+    const run_versions = { ...(this.runVersions?.() ?? {}), delivery_source: device.source, app_version: device.device_info?.app_version ?? null };
+    const snapshot: Snapshot = structuredClone({ ...this.material, display_mode: mode as DisplayMode, participant, config_hash: hash(participant), content_hash: hash(this.material), run_versions });
     const s: Session = { id: randomUUID(), token_hash: hash(token), snapshot, state: {
       phase: metadata.tutorial_enabled ? 'TUTORIAL_INTRO' : 'INTRO', stage: 0, unit: 0, page_token: randomUUID(), displayed: {}, drafts: {}, reveals: {},
       started_at: this.iso(), ended_at: null, ended_elapsed_ms: null, last_elapsed_ms: 0, break_until_ms: null, break_completed: false,
@@ -240,7 +248,7 @@ export class Engine {
     this.clocks.set(s.id, { base: 0, origin: this.monoNow() });
     this.store.tx(() => {
       this.store.create(s);
-      this.log(s, 'session_created', { config_hash: snapshot.config_hash, content_hash: snapshot.content_hash, stimulus_version: snapshot.stimulus_version, adapter: this.adapter.getStatus(), metadata, is_debug: this.isDebug(s), copied_from: participant.copied_from ?? null });
+      this.log(s, 'session_created', { config_hash: snapshot.config_hash, content_hash: snapshot.content_hash, stimulus_version: snapshot.stimulus_version, adapter: this.adapter.getStatus(), run_versions, metadata, is_debug: this.isDebug(s), copied_from: participant.copied_from ?? null });
       this.store.save(s);
     });
     return { session_id: s.id, token, view: this.view(s.id) };
@@ -534,7 +542,7 @@ export class Engine {
     const u2 = inU2 ? this.u2Elapsed(s, stageId, now) : null, windowMs = this.restWindow(s, stageId);
     const status = inU2 ? (r ? (r.status === 'done' ? 'rested' : r.status) : u2 === null || u2 < windowMs ? 'before_window' : 'available') : afterU2 ? (r ? 'rested' : 'not_rested') : 'not_in_u2';
     const a = this.assignment(s), message = this.store.interventions(s.id).find(m => m.stage_id === stageId);
-    const t2 = !a.condition.endsWith('T2') ? null : message ? (message.status === 'failed' ? 'failed' : 'sent') : r?.status === 'resting' && r.t2_due_ms !== null ? 'scheduled' : afterU2 ? 'not_triggered' : 'awaiting_rest';
+    const t2 = !a.condition.endsWith('T2') ? null : message ? (NOT_DISPLAYED.includes(message.status) ? message.status : 'sent') : r?.status === 'resting' && r.t2_due_ms !== null ? 'scheduled' : afterU2 ? 'not_triggered' : 'awaiting_rest';
     return { status, u2_elapsed_ms: u2, window_min_ms: windowMs, remaining_ms: r?.status === 'resting' ? Math.max(0, r.until_ms! - now) : null,
       reminder_count: reminders.length, last_reminder_at: reminders.at(-1)?.sent_at ?? null, after_reminder: r?.after_reminder ?? false, rest_started_at: r?.started_at ?? null,
       t2, t2_due_in_ms: t2 === 'scheduled' ? Math.max(0, r!.t2_due_ms! - now) : null };
@@ -632,14 +640,16 @@ export class Engine {
         this.log(s, 'message_send_requested', { request_id: message.request_id, message_id: message.message_id, duration_ms: message.duration_ms, source: message.source }, context); this.store.save(s);
       });
       // 已先持久化发送意图；网络调用绝不阻塞主任务响应，不在恢复后自动重发。
-      let timer: ReturnType<typeof setTimeout>;
+      // 5 秒上限：到点先中止仍未写入线路的调用（适配器回 not_sent），再给适配器短暂收尾；仍无结果按已发出未确认（unacknowledged）记录。
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const abort = new AbortController();
       const sending = Promise.resolve().then(() => {
         const target = this.adapter.getStatus();
-        if (target.source !== message.source || (message.source === 'device' && target.device_id !== message.device_id)) throw new Error('adapter_mode_or_device_mismatch');
+        if (target.source !== message.source || (message.source === 'device' && target.device_id !== message.device_id)) throw new PreSendError('adapter_mode_or_device_mismatch');
         return this.adapter.send({ session_id: id, participant_id: message.participant_id, stage_id: stimulus.stage_id, message_id: stimulus.message_id,
-        request_id: message.request_id, text: stimulus.text, device_id: message.device_id, duration_ms: message.duration_ms as 8500 | 11000, ...(message.display_mode && message.display_mode !== 'legacy_8500' ? { display_mode: message.display_mode } : {}) });
+        request_id: message.request_id, text: stimulus.text, device_id: message.device_id, duration_ms: message.duration_ms, ...(message.display_mode && message.display_mode !== 'legacy_8500' ? { display_mode: message.display_mode } : {}) }, { signal: abort.signal });
       });
-      const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('adapter_send_timeout_delivery_unknown')), 5000); });
+      const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => { abort.abort(); timer = setTimeout(() => reject(new Error(SEND_TIMEOUT)), SEND_ABORT_GRACE_MS); }, SEND_TIMEOUT_MS); });
       const task = Promise.race([sending, deadline]).then(receipt => {
         if (receipt.request_id !== message.request_id || receipt.source !== message.source || (message.device_id && receipt.device_id !== message.device_id)) throw new Error('adapter_receipt_identity_mismatch');
         this.store.tx(() => {
@@ -650,7 +660,7 @@ export class Engine {
           Object.assign(message, { status: deviceFailed || receipt.status === 'failed' ? 'failed' : message.device_events?.length ? 'accepted' : receipt.status, source: receipt.source, t_ack: receipt.t_ack, t_display: receipt.t_display, t_hide: receipt.t_hide,
             display_time_source: receipt.display_time_source, receipt, error: receipt.status === 'failed' ? receipt.error : deviceFailed ? message.error : message.device_events?.length ? null : receipt.error });
           this.store.intervention(message);
-          this.log(current, receipt.status === 'accepted' ? 'message_send_accepted' : 'message_failed', { request_id: message.request_id, receipt }, context);
+          this.log(current, receipt.status === 'accepted' ? 'message_send_accepted' : 'message_failed', { request_id: message.request_id, receipt, delivery: receipt.status, retry: false }, context);
           if (receipt.t_display) this.log(current, 'message_display_confirmed', { request_id: message.request_id, t_display: receipt.t_display, source: receipt.source }, context);
           if (receipt.t_hide) this.log(current, 'message_hidden', { request_id: message.request_id, t_hide: receipt.t_hide, source: receipt.source }, context);
           if (receipt.status !== 'accepted') current.state.attention.push(`${message.stage_id}:${receipt.error ?? receipt.status}`);
@@ -660,12 +670,14 @@ export class Engine {
         this.store.tx(() => {
           const current = this.session(id); Object.assign(message, this.store.findRequest(message.request_id));
           if (message.device_events?.length) { this.log(current, 'message_transport_error', { request_id: message.request_id, reason: String(error) }, context); this.store.save(current); return; }
-          message.status = message.source === 'device' ? 'unknown' : 'failed'; message.error = error instanceof Error ? error.message : String(error);
-          this.store.intervention(message); current.state.attention.push(`${message.stage_id}:message_failed`);
-          this.log(current, 'message_failed', { request_id: message.request_id, reason: message.error }, context); this.store.save(current);
+          // unknown 只留给进程重启恢复；运行中的异常按是否可能已写入线路区分 failed / not_sent / unacknowledged。
+          const delivery = message.source === 'device' ? sendErrorDelivery(error) : 'failed';
+          message.status = delivery; message.error = error instanceof Error ? error.message : String(error);
+          this.store.intervention(message); current.state.attention.push(`${message.stage_id}:${delivery === 'unacknowledged' ? 'unacknowledged' : delivery === 'not_sent' ? 'message_not_sent' : 'message_failed'}`);
+          this.log(current, 'message_failed', { request_id: message.request_id, reason: message.error, delivery, retry: false }, context); this.store.save(current);
         });
       });
-      const tracked = task.finally(() => clearTimeout(timer));
+      const tracked = task.finally(() => { if (timer) clearTimeout(timer); });
       this.pending.add(tracked); void tracked.then(() => this.pending.delete(tracked), () => this.pending.delete(tracked));
     }
   }

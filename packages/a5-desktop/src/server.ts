@@ -9,6 +9,7 @@ import {SharedGlassesAdapter} from '@a5/glasses/adapters/shared-glasses.ts';
 import { MockGlassesAdapter } from '@a5/glasses/adapters/mock-glasses.ts';
 import { DeviceControl } from './device-control.ts';
 import { preflight } from './preflight.ts';
+import { collectRunVersions } from './run-versions.ts';
 import { experimentRoot, readJson } from './profile.ts';
 import type { GlassesAdapter, ParticipantConfig } from './contracts.ts';
 
@@ -24,10 +25,15 @@ if (!['mock','device','rayneo'].includes(mode))throw new Error('A5_GLASSES_MODE 
 const remembered=store.setting<{serial:string;identity:'adb'|'hardware'}>('device_route');
 const serial=remembered?.serial??process.env.A5_GLASSES_SERIAL??process.env.A5_RAYNEO_SERIAL??'';
 const identity=remembered?.identity??(process.env.A5_DEVICE_IDENTITY==='hardware'?'hardware':'adb');
-const adapter:GlassesAdapter=mode==='mock'?new MockGlassesAdapter():new SharedGlassesAdapter(serial,{adb:process.env.A5_ADB_PATH,identity});
-const engine = new Engine(store, adapter, await loadMaterial(), await readJson<ParticipantConfig>('config/participants.pilot.json'));
+const material = await loadMaterial();
+// 允许的固定时长来自材料（content/tasks.json 的 message_duration_ms）与 8500 兼容值；A5_DISPLAY_DURATIONS_MS=逗号分隔毫秒 可覆盖。
+const durationsMs = process.env.A5_DISPLAY_DURATIONS_MS ? process.env.A5_DISPLAY_DURATIONS_MS.split(',').map(v => Number(v.trim())) : [...new Set([8500, material.content.message_duration_ms])];
+const adapter:GlassesAdapter=mode==='mock'?new MockGlassesAdapter():new SharedGlassesAdapter(serial,{adb:process.env.A5_ADB_PATH,identity,durationsMs});
+const engine = new Engine(store, adapter, material, await readJson<ParticipantConfig>('config/participants.pilot.json'));
 const deviceControl = new DeviceControl(engine, { serial,identity, adb: process.env.A5_ADB_PATH,
   packageName:process.env.A5_GLASSES_PACKAGE, enabled: process.env.A5_RAYNEO_HOST_MODE !== 'off', scrcpy: process.env.A5_SCRCPY_PATH });
+const staticVersions = collectRunVersions();
+engine.runVersions = () => ({ ...staticVersions, ...deviceControl.versionEvidence() });
 const server = createApp(engine, resolve(process.env.A5_EXPORT_DIR ?? join(experimentRoot, 'exports')), deviceControl, join(experimentRoot, 'config/notifications'));
 engine.pollDevice();
 /** 每秒回收设备事件、执行已隔离异常的控制任务并推进实验。 */
@@ -37,6 +43,7 @@ server.listen(port, process.env.HOST ?? '0.0.0.0', () => {
   console.log(`实验员后台：http://127.0.0.1:${port}/admin`);
   if ((process.env.HOST ?? '0.0.0.0') === '0.0.0.0') for (const item of lanAddresses(port)) console.log(`其他设备（${item.name}）：${item.base_url}/admin`);
   console.log(`数据库：${join(runtime, 'experiment.sqlite')}`);
+  console.log(`版本：实验 ${staticVersions.experiment_commit?.slice(0, 12) ?? '未知'}${staticVersions.experiment_dirty ? '（有未提交改动）' : ''} · 显示端基座 ${staticVersions.display_base_tag} ${staticVersions.display_base_commit?.slice(0, 12) ?? '未知'}${staticVersions.display_base_commit && staticVersions.display_base_commit !== staticVersions.display_base_commit_pinned ? '（与固定提交不符）' : ''} · APK ${staticVersions.display_apk_sha256_pinned.slice(0, 12)}`);
   console.log(mode === 'mock' ? '当前为 Mock 预演模式，不能用于真实消息呈现实验。' : `当前为共享显示端真机模式，设备：${adapter.getStatus().device_id ?? '尚未配置序列号'}；硬件呈现仍需现场验收。`);
 });
 let stopping = false;

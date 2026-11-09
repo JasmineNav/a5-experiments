@@ -56,7 +56,7 @@ node scripts/verify-apk-runtime.mjs app/build/outputs/apk/debug/app-debug.apk
 - `src/store.ts` 使用 Node 内置 SQLite（WAL、synchronous=FULL）。事件表与设备原始事件只追加，禁止更新/删除；会话删除只是 `state.deleted` 软标记。
 - 会话创建时固定题目、刺激和配置快照；修改 `content/` 或 `config/` 不影响已有会话。配置文件在 `config/notifications/*.json`，`display_mode` 逐通知配置（`legacy_8500` / `tone_8500` / `confirm_until_ack`）。
 - 消息流程：先在事务中保存 `request_id` 与发送意图，再异步调用适配器；回执和设备事件按 `request_id` 合并。重启时未完成发送标为 unknown，绝不重放。`interventions.data_kind` 区分 formal / tutorial / manual。
-- 眼镜 APK 必须保持最新：服务端用 `Engine.requireFixedDuration()` 核对显示端声明的 `fixed_duration_ms`，不支持当前固定时长就拒绝建会话和发通知，后台提示更新 APK。改动通知时长时需同步 `content/tasks.json`、`preflight.ts`、`admin.js` 的 `FIXED_DURATION_MS` 和 `rayneo-glasses.ts` 的发送前校验；显示端 1.1.5 起已接受 1000—60000 毫秒任意时长（`fixed_duration_range_ms`），一般无需再改 APK。
+- 眼镜 APK 必须保持最新：服务端用 `Engine.requireFixedDuration()` 核对显示端声明的 `fixed_duration_ms`，不支持当前固定时长就拒绝建会话和发通知，后台提示更新 APK。改动通知时长只需改 `content/tasks.json` 的 `message_duration_ms`（1000—60000 整数）；服务端按它配置适配器发送前允许值（也可用 `A5_DISPLAY_DURATIONS_MS` 覆盖），`admin.js` 的 `FIXED_DURATION_MS` 只影响后台设备提示，需要时一并改。共享显示端按 `capabilities.text_duration_ms` 声明范围，无需改 APK。显示端版本/提交/APK SHA 只在根目录 `display-release.json` 固定。
 - 时间：`elapsed_ms` 用服务器单调时钟；浏览器可见证据、服务器接收时间、设备原始时间分开存储，不直接相减。
 
 ## 必须遵守的约束

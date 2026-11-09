@@ -9,8 +9,8 @@ export interface GlassesRequest {
   stage_id: string;
   message_id: string;
   text: string;
-  /** 固定模式的目标时长；confirm_until_ack忽略此值，不设置自动隐藏。8500保留兼容旧快照。 */
-  duration_ms: 8500 | 11000;
+  /** 固定模式的目标时长（毫秒）；confirm_until_ack忽略此值，不设置自动隐藏。默认 11000，8500 保留兼容旧快照；允许值由适配器配置。 */
+  duration_ms: number;
   display_mode?: DisplayMode;
   device_id?: string;
 }
@@ -18,7 +18,8 @@ export interface GlassesRequest {
 export interface GlassesReceipt {
   request_id: string;
   source: 'mock' | 'device';
-  status: 'accepted' | 'failed' | 'unacknowledged';
+  /** not_sent：命令确定没有写入线路（无连接、取消或过截止时间），可由调用方决定是否以新 request_id 另发；unacknowledged：可能已写入但无回执。 */
+  status: 'accepted' | 'failed' | 'unacknowledged' | 'not_sent';
   t_send: string;
   t_ack: string | null;
   t_display: string | null;
@@ -44,6 +45,17 @@ export interface GlassesEvent {
   hide_reason?: string | null;
   tone?:Tone|null; tone_start_monotonic_ms?:number|null;
 }
+/** 适配器在写入线路之前就确定失败时抛出：failed 为本地校验拒绝，not_sent 为无连接/取消。两者都确定没有发出，不是在途未知。 */
+export class PreSendError extends Error {
+  readonly delivery: 'failed' | 'not_sent';
+  constructor(message: string, delivery: 'failed' | 'not_sent' = 'failed') { super(message); this.delivery = delivery; }
+}
+/** 统一判定发送异常的投递状态；带 delivery 标记（含基座 NotSentError）的按标记，其余视为可能已发出但未确认。 */
+export function sendErrorDelivery(error: unknown): 'failed' | 'not_sent' | 'unacknowledged' {
+  const d = (error as { delivery?: unknown } | null)?.delivery;
+  return d === 'failed' || d === 'not_sent' ? d : 'unacknowledged';
+}
+export interface SendOptions { signal?: AbortSignal; deadline?: number }
 export interface GlassesStatus {
   source: 'mock' | 'device'; connected: boolean;
   device_id?: string; ready?: boolean; busy?: boolean; error?: string | null;
@@ -65,7 +77,7 @@ export interface GlassesAdapter {
   /** 释放设备传输资源，可异步完成。 */
   close?(): void | Promise<void>;
   /** 发送带永久去重编号的消息；接受回执不代表实际光学呈现。 */
-  send(request: GlassesRequest): Promise<GlassesReceipt>;
+  send(request: GlassesRequest, options?: SendOptions): Promise<GlassesReceipt>;
   confirm?(request: { request_id: string; device_id?: string }): Promise<void>;
   cancel?(request: { request_id: string; device_id?: string }): Promise<void>;
 }

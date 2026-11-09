@@ -1,6 +1,10 @@
 #!/bin/bash
 cd -- "$(dirname -- "$0")" || exit 1
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.volta/bin:$PATH"
+if [ -x ".a5-local/android/platform-tools/adb" ]; then
+  export A5_ADB_PATH="$PWD/.a5-local/android/platform-tools/adb"
+  export PATH="$PWD/.a5-local/android/platform-tools:$PATH"
+fi
 if ! command -v node >/dev/null 2>&1 && [ -s "$HOME/.nvm/nvm.sh" ]; then
   . "$HOME/.nvm/nvm.sh"
 fi

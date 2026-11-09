@@ -69,7 +69,7 @@ function stageRows(c: Capture, stage: Stage, assignment: Participant['stages'][n
   const windowOpen = u2Shown && windowMs !== null ? u2Shown.elapsed_ms + windowMs : null;
   const resumeAfterRest = firstAnswerAfter(c.events, unitIds, ended?.elapsed_ms);
   const t2Planned = ofRest('rest_t2_planned'), t2Due = ofRest('rest_t2_due');
-  const t2Status = !isT2 ? 'not_applicable' : message ? (message.status === 'failed' ? 'failed' : 'sent') : t2Missing ? 'not_triggered' : 'pending';
+  const t2Status = !isT2 ? 'not_applicable' : message ? (['failed', 'not_sent'].includes(message.status) ? message.status : 'sent') : t2Missing ? 'not_triggered' : 'pending';
   if (config) {
     const clicks = ev.filter(e => e.event_type === 'rest_clicked'), reminders = ev.filter(e => e.event_type === 'rest_reminder_sent');
     rests.push({ ...common, stage_id: stageId, condition: assignment.condition, message_id: assignment.message_id, rest_status: restStatus, rest_id: restId,
@@ -93,12 +93,12 @@ function stageRows(c: Capture, stage: Stage, assignment: Participant['stages'][n
       u2_submitted_at: timestamp(u2Submit), u2_submitted_elapsed_ms: elapsed(u2Submit), resume_answer_after_rest_ms: resumeAfterRest,
       t2_status: t2Status, t2_planned_elapsed_ms: t2Planned?.payload.planned_elapsed_ms ?? null, t2_due_elapsed_ms: elapsed(t2Due) ?? null,
       t2_actual_delay_ms: t2Due?.payload.actual_delay_ms ?? null, t2_request_id: isT2 ? message?.request_id ?? null : null,
-      t2_failure_reason: isT2 && message?.status === 'failed' ? message.error ?? null : null });
+      t2_failure_reason: isT2 && ['failed', 'not_sent'].includes(message?.status ?? '') ? message!.error ?? null : null });
   }
   const u1 = u1Id ? unitRows[u1Id] : undefined, u2 = u2Id ? unitRows[u2Id] : undefined;
   stageSummary.push({ ...common, stage_id: stageId, condition: assignment.condition, message_id: assignment.message_id, timing: assignment.condition.split('-')[1] ?? null,
     message_status: assignment.condition === 'NONE' ? 'none' : message ? message.status : t2Missing ? 't2_not_triggered' : 'not_triggered',
-    t2_not_triggered: !!t2Missing, send_failed: message?.status === 'failed', message_request_id: message?.request_id ?? null, message_error: message?.error ?? null,
+    t2_not_triggered: !!t2Missing, send_failed: ['failed', 'not_sent'].includes(message?.status ?? ''), message_request_id: message?.request_id ?? null, message_error: message?.error ?? null,
     message_event_elapsed_ms: message?.event_elapsed_ms ?? null, message_drawn_received_elapsed_ms: elapsed(drawn), message_hidden_received_elapsed_ms: elapsed(hidden),
     rest_status: restStatus, rest_started_elapsed_ms: elapsed(started), rest_start_from_u2_ms: diff(started?.elapsed_ms, u2Shown?.elapsed_ms),
     rest_answered_fields_at_start: started?.payload.answered_fields ?? null, rest_total_fields: started?.payload.total_fields ?? null,
@@ -131,7 +131,11 @@ export async function exportData(engine: Engine, ids: string[], outputRoot: stri
     const intro = c.events.find(e => e.event_type === 'intro_displayed'); const introEnd = c.events.find(e => e.event_type === 'intro_continue');
     const tutorialStart=c.events.find(e=>e.event_type==='tutorial_intro_displayed'), tutorialEnd=c.events.find(e=>e.event_type==='tutorial_completed');
     sessions.push({ ...common, tutorial_started_at:timestamp(tutorialStart),tutorial_completed_at:timestamp(tutorialEnd),tutorial_duration_ms:tutorialStart&&tutorialEnd?tutorialEnd.elapsed_ms-tutorialStart.elapsed_ms:null,tutorial_answer_attempts:c.events.filter(e=>e.event_type==='tutorial_answer_submitted').length, ...c.summary, device_source: (c.events.find(e => e.event_type === 'session_created')?.payload.adapter as { source?: string })?.source,
-      stimulus_version: s.snapshot.stimulus_version, content_hash: s.snapshot.content_hash, intro_displayed: timestamp(intro), intro_continue: timestamp(introEnd), intro_duration_ms: intro && introEnd ? introEnd.elapsed_ms - intro.elapsed_ms : null,
+      stimulus_version: s.snapshot.stimulus_version, content_hash: s.snapshot.content_hash,
+      experiment_commit: s.snapshot.run_versions?.experiment_commit ?? null, experiment_dirty: s.snapshot.run_versions?.experiment_dirty ?? null,
+      display_base_tag: s.snapshot.run_versions?.display_base_tag ?? null, display_base_commit: s.snapshot.run_versions?.display_base_commit ?? null,
+      display_apk_sha256: s.snapshot.run_versions?.installed_apk_sha256 ?? null, display_apk_sha256_pinned: s.snapshot.run_versions?.display_apk_sha256_pinned ?? null,
+      display_app_version: s.snapshot.run_versions?.app_version ?? null, intro_displayed: timestamp(intro), intro_continue: timestamp(introEnd), intro_duration_ms: intro && introEnd ? introEnd.elapsed_ms - intro.elapsed_ms : null,
       resume_count: c.events.filter(e => e.event_type === 'app_resumed').length, anomaly_count: s.state.attention.length,
       breaks_skipped: c.events.filter(e => e.event_type === 'break_skipped').length,
       rests_taken: c.events.filter(e => formal(e) && e.event_type === 'rest_started').length,

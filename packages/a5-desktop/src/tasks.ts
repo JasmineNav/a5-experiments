@@ -58,6 +58,8 @@ export interface Snapshot {
   display_mode?: import('./contracts.ts').DisplayMode;
   content: TaskContent; stimuli: Stimulus[]; stimulus_version: string; participant: Participant;
   assets: Record<string, { base64: string; sha256: string }>; config_hash: string; content_hash: string;
+  /** 建会话时固定的版本坐标（实验提交、显示端基座、APK、app_version）；旧会话没有此字段。 */
+  run_versions?: Record<string, unknown>;
 }
 export const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 

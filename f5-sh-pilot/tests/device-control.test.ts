@@ -6,6 +6,7 @@ import { Store } from '@a5/desktop/store.ts';
 import { loadMaterial } from '@a5/desktop/tasks.ts';
 import { readJson } from '@a5/desktop/preflight.ts';
 import { DeviceControl } from '@a5/desktop/device-control.ts';
+import { legacyDisplayPackages } from '@a5/glasses/legacy-display.ts';
 import { createApp } from '@a5/desktop/app.ts';
 import type { GlassesAdapter, GlassesEvent, GlassesRequest, ParticipantConfig } from '@a5/desktop/contracts.ts';
 
@@ -178,7 +179,12 @@ test('只收起覆盖显示应用的系统面板；正常显示时不发送返�
     f.overlay(true);
     await f.control.action({ action: 'open' });
     assert.equal(f.calls.filter(args => args.includes('android.intent.action.CLOSE_SYSTEM_DIALOGS')).length, 1);
-    assert.equal(f.calls.some(args => args.includes('KEYCODE_BACK') || args.includes('force-stop')), false);
+    assert.equal(f.calls.some(args => args.includes('KEYCODE_BACK')), false);
+    // 打开时只停止迁移前的旧 A5 显示端，绝不停止正在使用的共享显示端。
+    const stops = f.calls.filter(args => args.includes('force-stop')).map(args => args.at(-1));
+    assert.ok(stops.length > 0 && stops.every(pkg => legacyDisplayPackages.includes(pkg!)));
+    const firstStart = f.calls.findIndex(args => args.includes('am') && args.includes('start'));
+    assert.ok(f.calls.findIndex(args => args.includes('force-stop')) < firstStart, '先停旧显示端再启动共享显示端');
   } finally { await f.control.close(); f.store.close(); }
 });
 
@@ -292,4 +298,22 @@ test('退出等待展示最多十五秒，设备持续忙碌时保留原权限�
     assert.equal(f.control.status().audit[0].action, 'voice_overlay_restore_deferred');
     assert.equal(f.sends(), 0);
   } finally { f.busy(false); await f.control.close(); f.store.close(); }
+});
+
+test('确认模式测试通知：未绘制的记录只在时长窗口内保护，不会永久挡住重连/打开；绘制后保护到消失', async () => {
+  const f = await fixture();
+  try {
+    const request_id = randomUUID();
+    await f.control.action({ action: 'notify', request_id, text: '确认测试', display_mode: 'confirm_until_ack' });
+    await assert.rejects(f.control.action({ action: 'open' }), /尚未展示结束/);
+    f.advance(20000);
+    assert.equal((await f.control.action({ action: 'open' })).adapter.connected, true);
+    const event = (kind: GlassesEvent['kind']): GlassesEvent => ({ event_id: randomUUID(), request_id, device_id: 'adb:fixture', kind, device_wall_ms: 1, device_monotonic_ms: 1, clock_id: 'boot', error: null });
+    f.engine.receiveDeviceEvent(event('drawn'));
+    f.advance(60000);
+    await assert.rejects(f.control.action({ action: 'open' }), /尚未展示结束/);
+    f.engine.receiveDeviceEvent(event('hidden'));
+    await f.control.action({ action: 'open' });
+    assert.equal(f.sends(), 1);
+  } finally { await f.control.close(); f.store.close(); }
 });
