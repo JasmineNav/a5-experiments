@@ -2,7 +2,11 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import {displayRelease,apkName,obtainDisplayApk,verifyApk} from './display-release.mjs';
-import { dirname, resolve, join } from 'node:path';
+import { dirname, resolve, join, delimiter } from 'node:path';
+import { adbCandidates, compareVersions, configuredApkPath } from './device-tools.mjs';
+// 迁移前 A5 自带显示端；打开共享显示端前先停止，避免旧进程抢前台。
+import { legacyDisplayPackages as legacyPackages } from '../packages/a5-glasses/src/legacy-display.ts';
+import { grantRuntimePermissions } from '@lab/glasses-display';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -15,6 +19,8 @@ const experimentIndex = process.argv.indexOf('--experiment');
 const name = experimentIndex === -1 ? 'f5-sh-pilot' : process.argv[experimentIndex + 1];
 if (!/^f5-(sh|sl)-[a-z0-9-]+$/.test(name ?? '')) throw new Error('--experiment 必须是 f5-sh-* 或 f5-sl-* 实验目录名。');
 const pkg = 'link.ironip.glasses.display';
+const windows = process.platform === 'win32';
+const exe = name => windows ? `${name}.exe` : name;
 const expectedVersion=displayRelease.version;
 const configPath = join(local, 'device.json');
 const action = process.argv[2] ?? 'start';
@@ -35,21 +41,20 @@ async function runAdb(adb, args) {
   }
 }
 async function resolveAdb(config) {
-  const candidates = [join(local, 'android', 'platform-tools', 'adb.exe'), config.adbPath, process.env.A5_ADB_PATH,
-    process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'A5', 'android', 'platform-tools', 'adb.exe')];
+  const candidates = adbCandidates(config, { local });
   try {
-    const found = await execute('where.exe', ['adb.exe'], { cwd: root, windowsHide: true, timeout: 5000 });
+    const found = windows ? await execute('where.exe', ['adb.exe'], { cwd: root, windowsHide: true, timeout: 5000 }) : await execute('/bin/sh', ['-c', 'command -v adb'], { cwd: root, timeout: 5000 });
     candidates.push(...found.stdout.split(/\r?\n/));
   } catch {}
   for (const candidate of new Set(candidates.filter(Boolean).map(value => value.trim().replace(/^"|"$/g, '')))) {
     try {
       await execute(candidate, ['version'], { cwd: root, windowsHide: true, timeout: 5000 });
       process.env.A5_ADB_PATH = candidate;
-      process.env.PATH = `${dirname(candidate)};${process.env.PATH ?? ''}`;
+      process.env.PATH = `${dirname(candidate)}${delimiter}${process.env.PATH ?? ''}`;
       return candidate;
     } catch {}
   }
-  throw new Error('未找到可执行的 ADB。已检查设备配置、用户安装目录及 PATH，请确认 platform-tools 中的 adb.exe 可运行。');
+  throw new Error(`未找到可执行的 ADB。已检查设备配置、用户安装目录及 PATH，请确认 platform-tools 中的 ${exe('adb')} 可运行（macOS 可用 brew install android-platform-tools）。`);
 }
 async function device() {
   const config = await readConfig();
@@ -65,12 +70,13 @@ async function device() {
   const packageName=pkg;
   await mkdir(local, { recursive: true });
   await writeFile(configPath, JSON.stringify({ ...config, adbPath: adb, serial }, null, 2) + '\n', { mode: 0o600 });
-  const localScrcpy = join(local, 'scrcpy', 'scrcpy.exe');
+  const localScrcpy = join(local, 'scrcpy', exe('scrcpy'));
   let scrcpyPath = config.scrcpyPath;
   try { await execute(localScrcpy, ['--version'], { cwd: root, windowsHide: true, timeout: 5000 }); scrcpyPath = localScrcpy; } catch {}
   return { connected:true,adb, serial, port: requestedPort ?? (name === 'f5-sh-pilot' ? config.port ?? 5173 : undefined), packageName, scrcpyPath,
     activityName: `${packageName}/link.ironip.glasses.display.MainActivity`,
-    apkPath: config.packageName===pkg&&config.apkPath?config.apkPath:join(root,'artifacts',apkName()) };
+    // device.json 的 apkPath（绝对路径或相对仓库根目录）优先；仍须通过固定 SHA-256 校验才会安装。
+    apkPath: configuredApkPath(config, root) };
 }
 async function health(port) {
   const response = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(2000) });
@@ -91,9 +97,10 @@ function describe(value) {
 }
 async function open(manager) {
   const url = await manager.adminUrl(name);
+  const [command, args] = windows ? ['rundll32.exe', ['url.dll,FileProtocolHandler', url]] : process.platform === 'darwin' ? ['open', [url]] : ['xdg-open', [url]];
   await new Promise((done, reject) => {
-    const child = spawn('rundll32.exe', ['url.dll,FileProtocolHandler', url], { windowsHide: true, stdio: 'ignore' });
-    child.once('error', reject); child.once('exit', code => code === 0 ? done() : reject(new Error('浏览器未能打开，请在总 BAT 中选择 5 打开后台。')));
+    const child = spawn(command, args, { windowsHide: true, stdio: 'ignore' });
+    child.once('error', reject); child.once('exit', code => code === 0 ? done() : reject(new Error(`浏览器未能打开，请手动访问 ${url}。`)));
   });
   console.log('已在浏览器打开管理后台。');
 }
@@ -150,7 +157,11 @@ try {
       if(target.connected){
         const installed=await runAdb(target.adb,['-s',target.serial,'shell','dumpsys','package',pkg]);
         const version=/versionName=(\S+)/.exec(installed)?.[1];
-        if(version!==expectedVersion){
+        for(const legacy of legacyPackages)await runAdb(target.adb,['-s',target.serial,'shell','am','force-stop',legacy]).catch(()=>{});
+        if(version&&compareVersions(version,expectedVersion)>0){
+          // 同一副眼镜可能被其他实验装了更高版本；adb install -r 不能降级，也不卸载（会清账本）。
+          console.log(`眼镜上已是更高版本显示端 ${version}（本实验固定 ${expectedVersion}），不降级安装；版本坐标会记录实际 app_version。`);
+        }else if(version!==expectedVersion){
           const apkPath=await obtainDisplayApk({root,localPath:target.apkPath});
           await verifyApk(apkPath);
           const value=await health(status.port);
@@ -161,6 +172,8 @@ try {
           if(!after.includes(`versionName=${expectedVersion}`))throw new Error('安装后版本核对失败。');
           console.log(`共享显示端 ${expectedVersion} 已安装。`);
         }
+        const granted=await grantRuntimePermissions({run:(file,args)=>runAdb(file,args),adb:target.adb,serial:target.serial},{packageName:pkg});
+        if(!granted.ok)console.log(`相机/麦克风权限未能预授：${granted.results.filter(r=>!r.granted).map(r=>r.permission).join('、')}；首次打开显示端时请在眼镜上允许。`);
       }
     }catch(error){console.log(`硬件整备待处理：${error.message}；请在 Web 运行设备自检。`);}
     console.log('在 Web 按「选设备 → 连通道 → 打开显示端 → 试发验证」整备，可用 USB 或无线；路由由后端记忆。');

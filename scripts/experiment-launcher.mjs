@@ -47,7 +47,7 @@ async function perform(item, line) {
   else if (['check', 'doctor', 'install'].includes(action)) { if (action !== 'install' && !item.scripts?.[action]) throw new Error(`本实验未配置${action}命令。`); await runNpm(item, action); }
   else throw new Error('未知指令；输入help查看菜单。');
 }
-const menu = () => console.log('\n1/start 启动    2/stop 停止    3/restart 重启    4/status 状态\n5/open 打开后台    6/logs 日志    7/check 检查    8/doctor 自检\n9/mock 明确选择模拟预演（本机设备配置）\ni/install 安装仓库依赖    0/back 返回实验列表    q/quit 退出启动器\nWindows 已配置眼镜时，启动/重启使用 USB 真机模式，连接失败不会转为 Mock。\n可指定端口：start 5174。退出启动器后服务继续运行，需要停止请使用stop。');
+const menu = () => console.log('\n1/start 启动    2/stop 停止    3/restart 重启    4/status 状态\n5/open 打开后台    6/logs 日志    7/check 检查    8/doctor 自检\n9/mock 明确选择模拟预演（本机设备配置）\ni/install 安装仓库依赖    0/back 返回实验列表    q/quit 退出启动器\nWindows/macOS 启动/重启使用真机模式（USB 或无线），连接失败不会转为 Mock。\n可指定端口：start 5174。退出启动器后服务继续运行，需要停止请使用stop。');
 
 if (process.argv.includes('--action')) {
   const args = process.argv.slice(2); const argument = flag => args[args.indexOf(flag) + 1];

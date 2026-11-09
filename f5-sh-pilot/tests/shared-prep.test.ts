@@ -8,10 +8,11 @@ import {createApp} from '@a5/desktop/app.ts';
 import {DeviceControl} from '@a5/desktop/device-control.ts';import {loadMaterial} from '@a5/desktop/tasks.ts';import {testConfig} from './fixtures.ts';
 import {displayPayload} from '@a5/glasses/adapters/shared-glasses.ts';import type {GlassesAdapter,GlassesRequest} from '@a5/desktop/contracts.ts';
 import type {Capabilities} from '@lab/glasses-display';
+import {displayRelease} from '@a5/glasses/display-release.ts';
 const caps:Capabilities={commands:['show_text','confirm','cancel'],display_modes:['timed','confirm_until_ack'],text_duration_ms:{min:1000,max:60000},tone:true,tone_presets:['notification']};
 async function fixture(serial='USB1234',db=':memory:'){
- const store=new Store(db);let route=serial,connected=true,ready=true,busy=false,transport='device',now=200000,refused=false,canRecover=true,sends=0,voice='allow';const calls:string[][]=[];
- const adapter:GlassesAdapter={getStatus:()=>({source:'device',connected,ready,busy,route,device_id:`adb:${route}`,capabilities:caps,network:'lab',device_info:{app_version:'2.2.1'}}),probe:async()=>{},setRoute:async value=>{route=value;},clockSample:async()=>({device_monotonic_ms:1234,clock_id:'boot'}),send:async()=>{sends++;throw new Error('unexpected stimulus');},close:async()=>{}};
+ const store=new Store(db);let apkSha=displayRelease.sha256,route=serial,connected=true,ready=true,busy=false,transport='device',now=200000,refused=false,canRecover=true,sends=0,voice='allow';const calls:string[][]=[];
+ const adapter:GlassesAdapter={getStatus:()=>({source:'device',connected,ready,busy,route,device_id:`adb:${route}`,capabilities:caps,network:'lab',device_info:{app_version:displayRelease.version}}),probe:async()=>{},setRoute:async value=>{route=value;},clockSample:async()=>({device_monotonic_ms:1234,clock_id:'boot'}),send:async()=>{sends++;throw new Error('unexpected stimulus');},close:async()=>{}};
  const engine=new Engine(store,adapter,await loadMaterial(),await testConfig());
  const run=async(_file:string,args:string[])=>{
   calls.push(args);
@@ -23,13 +24,15 @@ async function fixture(serial='USB1234',db=':memory:'){
   if(args.includes('wifi'))return 'Wifi is connected to "lab"';
   if(args.includes('appops')){if(args.includes('set'))voice=args.at(-1)!;return `SYSTEM_ALERT_WINDOW: ${voice}`;}
   if(args.includes('start')&&args.includes('am')){if(canRecover){connected=true;ready=true;}return 'Starting';}
-  if(args.includes('package'))return 'versionName=2.2.1';
+  if(args.includes('pm')&&args.includes('path'))return 'package:/data/app/~~x/link.ironip.glasses.display/base.apk\n';
+  if(args.includes('sha256sum'))return `${apkSha}  ${args.at(-1)}\n`;
+  if(args.includes('package'))return `versionName=${displayRelease.version}`;
   if(args.includes('window'))return 'mCurrentFocus=Window link.ironip.glasses.display';
   if(args.includes('battery'))return 'level: 80\nUSB powered: true';return 'ok';
  };
  const control=new DeviceControl(engine,{serial,run,clock:{wall:()=>now,mono:()=>now},wait:async ms=>{now+=ms;}});
  const tick=async()=>{control.tick();for(let i=0;i<200&&control.status().working;i++)await new Promise<void>(r=>setImmediate(r));assert.equal(control.status().working,false);};
- return {store,engine,adapter,control,calls,tick,route:()=>route,advance:(ms:number)=>{now+=ms;},busy:(v:boolean)=>{busy=v;},offline:()=>{transport='offline';connected=false;ready=false;},refuse:(v:boolean)=>{refused=v;},stall:()=>{canRecover=false;ready=false;},sends:()=>sends,close:async()=>{busy=false;await control.close();await engine.settle();store.close();}};
+ return {store,engine,adapter,control,calls,tick,route:()=>route,advance:(ms:number)=>{now+=ms;},busy:(v:boolean)=>{busy=v;},offline:()=>{transport='offline';connected=false;ready=false;},refuse:(v:boolean)=>{refused=v;},stall:()=>{canRecover=false;ready=false;},sends:()=>sends,apkSha:(v:string)=>{apkSha=v;},close:async()=>{busy=false;await control.close();await engine.settle();store.close();}};
 }
 test('USB→无线：共享整备流程、默认 adb 身份、权限备份随同硬件路由搬迁',async()=>{const f=await fixture();try{f.store.setSetting('device_voice_overlay_backup:USB1234',{mode:'allow'});const result=await f.control.enableWirelessFromUsb('USB1234');assert.equal(result.connected_route,'192.168.1.9:5555');assert.equal(f.route(),result.connected_route);assert.equal(f.adapter.getStatus().device_id,'adb:192.168.1.9:5555');assert.ok(f.calls.some(a=>a.includes('tcpip')));assert.deepEqual(f.store.setting('device_voice_overlay_backup:192.168.1.9:5555'),{mode:'allow'});assert.equal(f.store.setting('device_voice_overlay_backup:USB1234'),null);assert.equal(f.control.status().remembered_routes[0].device_id,'glasses:HW123456');assert.equal(f.sends(),0);}finally{await f.close();}});
 test('offline 恢复先 disconnect/connect 后打开应用，从不补发刺激',async()=>{const f=await fixture('192.168.1.9:5555');try{f.offline();await f.tick();const disconnect=f.calls.findIndex(a=>a[0]==='disconnect'),connect=f.calls.findIndex(a=>a[0]==='connect');assert.ok(disconnect>=0&&connect>disconnect);assert.ok(f.calls.some(a=>a.includes('KEYCODE_WAKEUP')));assert.equal(f.adapter.getStatus().ready,true);assert.equal(f.sends(),0);}finally{await f.close();}});
@@ -42,3 +45,23 @@ test('doctor 只展示三次时钟样本，无跨设备校准',async()=>{const f
 
 test('应用守护 10s/20s 后第三次失败进入 host_stall，手动 open 可重置',async()=>{const f=await fixture();try{f.stall();await f.tick();await f.tick();assert.equal(f.calls.filter(a=>a.includes('KEYCODE_WAKEUP')).length,1);f.advance(10000);await f.tick();f.advance(20000);await f.tick();assert.equal(f.control.status().host_stall?.reason,'host_stall');const count=f.calls.length;f.advance(60000);await f.tick();assert.equal(f.calls.length,count);await f.control.action({action:'open'});assert.equal(f.control.status().host_stall,null);}finally{await f.close();}});
 test('HTTP 整备入口集中在后端：list/config/connect/enable-wireless/doctor',async()=>{const f=await fixture();const server=createApp(f.engine,'',f.control);await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));const port=(server.address() as {port:number}).port;try{const root=`http://127.0.0.1:${port}/api/admin/device/`;assert.equal((await fetch(root+'list')).status,200);const post=(path:string,body:object)=>fetch(root+path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});assert.equal((await post('config',{serial:'USB1234'})).status,200);assert.equal((await post('connect',{address:'192.168.1.9'})).status,200);assert.equal((await post('enable-wireless',{serial:'USB1234'})).status,200);const report=await post('doctor',{});assert.equal(report.status,200);assert.equal(((await report.json()) as {clock_samples:unknown[]}).clock_samples.length,3);assert.equal((await post('config',{})).status,422);}finally{await new Promise<void>(r=>server.close(()=>r()));await f.close();}});
+
+test('打开显示端：预授相机/麦克风（每路由一次）、停旧显示端、用基座收起系统面板，并测量已装 APK SHA-256',async()=>{const f=await fixture();try{
+ await f.control.action({action:'open'});
+ const grants=f.calls.filter(a=>a.includes('pm')&&a.includes('grant'));
+ assert.deepEqual(grants.map(a=>a.at(-1)),['android.permission.CAMERA','android.permission.RECORD_AUDIO']);assert.ok(grants.every(a=>a.includes('link.ironip.glasses.display')));
+ assert.ok(f.calls.some(a=>a.includes('force-stop')&&a.at(-1)==='link.ironip.a5.rayneo'));
+ assert.ok(f.calls.some(a=>a.includes('statusbar')&&a.includes('collapse')));
+ assert.deepEqual(f.control.versionEvidence(),{installed_apk_sha256:displayRelease.sha256,installed_apk_matches_pin:true,package_name:'link.ironip.glasses.display'});
+ assert.equal(f.control.status().expected_app_version,displayRelease.version);
+ await f.control.action({action:'open'});assert.equal(f.calls.filter(a=>a.includes('pm')&&a.includes('grant')).length,2,'同一路由不重复授予');
+ assert.equal(f.sends(),0);
+}finally{await f.close();}});
+test('已装 APK 与固定 SHA 不符时记审计，版本坐标如实写入会话快照',async()=>{const f=await fixture();try{
+ f.apkSha('f'.repeat(64));await f.control.action({action:'open'});
+ assert.equal(f.control.versionEvidence().installed_apk_matches_pin,false);
+ assert.ok((f.store.db.prepare('SELECT data FROM admin_audit').all() as {data:string}[]).some(r=>r.data.includes('display_apk_not_pinned')));
+ f.engine.runVersions=()=>({display_apk_sha256_pinned:displayRelease.sha256,...f.control.versionEvidence()});
+ const created=f.engine.create('000');const v=f.store.get(created.session_id)!.snapshot.run_versions!;
+ assert.equal(v.installed_apk_sha256,'f'.repeat(64));assert.equal(v.app_version,displayRelease.version);
+}finally{await f.close();}});

@@ -3,9 +3,11 @@ import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { repositoryRoot } from './experiment-manager.mjs';
 
-// Windows 静态实验先开真机后台与 Web 整备；首次没有设备配置也不能静默进入 Mock。
+/** 真机启动链路支持的桌面平台：Windows 与 macOS（Linux 实验室机同样可用）。 */
+export const devicePlatforms = Object.freeze(['win32', 'darwin', 'linux']);
+// 静态实验先开真机后台与 Web 整备；首次没有设备配置也不能静默进入 Mock。
 export async function localDeviceControl(item, { root = repositoryRoot, platform = process.platform } = {}) {
-  if (platform !== 'win32' || !/^f5-(sh|sl)-/.test(item.name)) return null;
+  if (!devicePlatforms.includes(platform) || !/^f5-(sh|sl)-/.test(item.name)) return null;
   const entry = join(root, 'scripts', 'glasses-control.mjs');
   try { await access(entry); } catch { throw new Error('缺少 scripts/glasses-control.mjs；未启动 Mock，请恢复真机启动脚本。'); }
   return entry;

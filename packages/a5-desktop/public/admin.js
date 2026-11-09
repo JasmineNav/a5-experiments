@@ -35,11 +35,11 @@ const narrow = window.matchMedia('(max-width: 899px)');
 
 /* ───────── 中文文案 ───────── */
 const PHASES = { TUTORIAL_INTRO:'教程：工作台',TUTORIAL_UNIT1:'教程：练习单元01',TUTORIAL_UNIT2:'教程：练习单元02',TUTORIAL_NOTICE:'教程：阅读消息',TUTORIAL_CHECK:'教程：理解题',TUTORIAL_REST:'教程：休息练习', INTRO:'情景导入', CARD:'说明卡', UNIT:'主任务', COMPREHENSION:'信息识读理解题', RATINGS:'信息体验评价量表', BREAK:'组间休息', COMPLETED:'完成页', ABORTED:'结束页' };
-const MESSAGE_STATUS = { NONE:'本组无消息', not_triggered:'尚未触发', awaiting_rest:'等待被试休息', t2_not_triggered:'T2未触发（未休息即提交）', scheduled:'等待发送', send_requested:'已发出，等待回执', accepted:'请求已接受', failed:'发送失败', unacknowledged:'未收到回执', unknown:'发送结果待核查' };
-const MESSAGE_TONE = { NONE:'neutral', not_triggered:'neutral', awaiting_rest:'pending', t2_not_triggered:'neutral', scheduled:'pending', send_requested:'pending', accepted:'ok', failed:'bad', unacknowledged:'bad', unknown:'bad' };
+const MESSAGE_STATUS = { NONE:'本组无消息', not_triggered:'尚未触发', awaiting_rest:'等待被试休息', t2_not_triggered:'T2未触发（未休息即提交）', scheduled:'等待发送', send_requested:'已发出，等待回执', accepted:'请求已接受', failed:'发送失败', unacknowledged:'未收到回执', not_sent:'未发出（确定未写入，不补发）', unknown:'发送结果待核查' };
+const MESSAGE_TONE = { NONE:'neutral', not_triggered:'neutral', awaiting_rest:'pending', t2_not_triggered:'neutral', scheduled:'pending', send_requested:'pending', accepted:'ok', failed:'bad', unacknowledged:'bad', not_sent:'bad', unknown:'bad' };
 const CATEGORIES = { interview:'访谈记录', observation:'任务观察', anomaly:'异常备注' };
 const ACTION_DONE = { pause:'已暂停实验', resume:'已恢复实验', stop:'已提前结束会话', skip_break:'已跳过休息', remind_rest:'已向被试屏幕发送休息提醒', debug_jump:'已跳转到所选调试页面' };
-const ATTENTION = { device_not_ready_at_t2:'T2送达时眼镜未就绪，未发送且不补发', previous_message_pending:'T2送达时上一条消息尚未确认，未发送且不补发', message_delivery_unknown:'消息发送结果未知', message_failed:'消息发送失败', mock_disconnected:'模拟眼镜未连接', mock_no_ack:'模拟眼镜未返回回执', device_foreground_lost:'眼镜显示端离开前台', device_window_focus_lost:'眼镜显示端失去焦点', device_draw_timeout:'眼镜正文未及时完成绘制', device_hide_draw_timeout:'眼镜清屏未及时完成绘制', device_activity_destroyed_delivery_unknown:'眼镜显示页面被关闭，结果待核查', device_process_restarted_delivery_unknown:'眼镜显示端重启，结果待核查', adapter_send_timeout_delivery_unknown:'发送超时，是否显示待核查', server_restarted_delivery_unknown:'服务重启，发送结果待核查', failed:'消息发送失败', unacknowledged:'未收到消息回执' };
+const ATTENTION = { device_not_ready_at_t2:'T2送达时眼镜未就绪，未发送且不补发', previous_message_pending:'T2送达时上一条消息尚未确认，未发送且不补发', message_delivery_unknown:'消息发送结果未知', message_failed:'消息发送失败', mock_disconnected:'模拟眼镜未连接', mock_no_ack:'模拟眼镜未返回回执', device_foreground_lost:'眼镜显示端离开前台', device_window_focus_lost:'眼镜显示端失去焦点', device_draw_timeout:'眼镜正文未及时完成绘制', device_hide_draw_timeout:'眼镜清屏未及时完成绘制', device_activity_destroyed_delivery_unknown:'眼镜显示页面被关闭，结果待核查', device_process_restarted_delivery_unknown:'眼镜显示端重启，结果待核查', adapter_send_timeout_delivery_unknown:'发送超时，是否显示待核查', adapter_send_timeout_unacknowledged:'发送超时，未收到回执，是否显示待核查', message_not_sent:'消息未发出（眼镜未连接或已取消），不补发', server_restarted_delivery_unknown:'服务重启，发送结果待核查', failed:'消息发送失败', unacknowledged:'未收到消息回执', not_sent:'消息未发出，不补发' };
 
 const fmtDateTime = new Intl.DateTimeFormat('zh-CN', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:false });
 const fmtTime = new Intl.DateTimeFormat('zh-CN', { hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false });
@@ -119,6 +119,7 @@ function restT2Text(rest) {
     case 'sent': return { text:'已发送', tone:'ok' };
     case 'not_triggered': return { text:'未触发（未休息即提交）', tone:'neutral' };
     case 'failed': return { text:'发送失败', tone:'bad' };
+    case 'not_sent': return { text:'未发出（不补发）', tone:'bad' };
     default: return null;
   }
 }
@@ -132,7 +133,11 @@ function deviceInfo(status) {
   const id = status.device_id ?? '雷鸟眼镜';
   if (!status.connected) return { short:`${id} · 连接中断`, long:`雷鸟设备 ${id}：连接中断，请检查 USB 连接与显示端。`, tone:'bad' };
   if (!status.ready) return { short:`${id} · 显示端未就绪`, long:`雷鸟设备 ${id}：显示端未就绪，请保持眼镜应用在前台。`, tone:'pending' };
-  if (!status.device_info?.fixed_duration_ms?.split(',').includes(String(FIXED_DURATION_MS))) return { short:`${id} · 显示端 APK 需更新`, long:`雷鸟设备 ${id}：显示端 ${status.device_info?.app_version ?? '未知版本'} 不支持${FIXED_DURATION_MS / 1000}秒固定时长，请安装最新显示端 APK（1.1.4 及以上）；更新前无法创建固定时长会话或发送固定时长通知。`, tone:'bad' };
+  // 共享显示端（2.x）通过 capabilities.text_duration_ms 声明范围，不再有 device_info.fixed_duration_ms；旧显示端仍按列表判断。
+  const caps = status.capabilities;
+  const durationSupported = caps ? !!caps.commands?.includes('show_text') && caps.text_duration_ms?.min <= FIXED_DURATION_MS && FIXED_DURATION_MS <= caps.text_duration_ms?.max
+    : !!status.device_info?.fixed_duration_ms?.split(',').includes(String(FIXED_DURATION_MS));
+  if (!durationSupported) return { short:`${id} · 显示端 APK 需更新`, long:`雷鸟设备 ${id}：显示端 ${status.device_info?.app_version ?? '未知版本'} 不支持${FIXED_DURATION_MS / 1000}秒固定时长，请安装最新显示端 APK（1.1.4 及以上）；更新前无法创建固定时长会话或发送固定时长通知。`, tone:'bad' };
   if (status.busy) return { short:`${id} · 正在展示消息`, long:`雷鸟设备 ${id}：正在展示消息。硬件呈现仍需现场验收。`, tone:'ok' };
   return { short:`${id} · 显示端就绪`, long:`雷鸟设备 ${id}：连接正常，显示端就绪。硬件呈现仍需现场验收。`, tone:'ok' };
 }
@@ -226,7 +231,7 @@ function renderDevice() {
   setText($('#device-detail'), info.long);
 }
 
-const DEBUG_STATUS = { sending: '发送中', accepted: '请求已接受，等待绘制证据', drawn: '双眼已绘制，正在展示', hidden: '双眼已绘制并已消失', failed: '显示失败', unknown: '结果待核查', unacknowledged: '未收到接受回执' };
+const DEBUG_STATUS = { sending: '发送中', accepted: '请求已接受，等待绘制证据', drawn: '双眼已绘制，正在展示', hidden: '双眼已绘制并已消失', failed: '显示失败', unknown: '结果待核查', unacknowledged: '未收到接受回执', not_sent: '未发出（不补发）' };
 /** 根据后台快照更新操作可用性、守护状态和独立通知记录。 */
 function renderDeviceControl() {
   const control = deviceControl;

@@ -25,7 +25,8 @@ export async function preflight() {
   const materialErrors: string[] = [];
   if (tasks.stages.length !== 7 || tasks.stages.some(s => s.units.length !== 2)) materialErrors.push('任务配置必须为7组14单元。');
   const rest = tasks.in_unit_rest;
-  if (tasks.message_duration_ms !== 11000) materialErrors.push('消息目标时长与当前协议不一致。');
+  // 显示端 1000—60000ms 任意整数时长；默认 11000，改值只需改 content/tasks.json。
+  if (!Number.isInteger(tasks.message_duration_ms) || tasks.message_duration_ms < 1000 || tasks.message_duration_ms > 60000) materialErrors.push('消息目标时长必须是 1000—60000 的整数毫秒。');
   if (!rest || !(rest.duration_ms > 0) || !(rest.tutorial_duration_ms > 0) || !(rest.t2_delay_ms >= 0 && rest.t2_delay_ms < rest.duration_ms) || !(rest.window_min_ms >= 0) || Object.values(rest.window_min_ms_by_stage ?? {}).some(v => !(v >= 0)) || !rest.reminder_text || !rest.early_click_text) materialErrors.push('第二单元休息配置缺失或无效：需正的休息时长，T2延迟须小于休息时长，窗口下限不能为负。');
   if (tasks.practice) {
     const units = tasks.practice.units;

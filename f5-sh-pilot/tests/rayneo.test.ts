@@ -7,7 +7,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { unzipSync, strFromU8 } from 'fflate';
-import {displayPayload} from '@a5/glasses/adapters/shared-glasses.ts';
+import {displayPayload, SharedGlassesAdapter} from '@a5/glasses/adapters/shared-glasses.ts';
+import { PreSendError } from '@a5/glasses/contracts.ts';
+import { displayRelease } from '@a5/glasses/display-release.ts';
 import { RayNeoGlassesAdapter, rayneoProtocol } from '@a5/glasses/adapters/rayneo-glasses.ts';
 import type { GlassesEvent, GlassesRequest, ParticipantConfig, GlassesAdapter } from '@a5/desktop/contracts.ts';
 import { Engine } from '@a5/desktop/engine.ts';
@@ -124,7 +126,8 @@ test('协议异常、容量拒绝和断线都显式留错；重连仅回收事�
     b.reject(); const rejected = await b.adapter.send(request()); assert.equal(rejected.error, 'device_text_does_not_fit'); assert.equal(rejected.status, 'failed');
     const shows = b.commands.filter(c => c === 'show_text').length;
     b.disconnect(); await until(() => !b.adapter.getStatus().connected);
-    assert.equal((await b.adapter.send(request())).status, 'unacknowledged');
+    // 2.2.4 起无存活连接立即拒绝，命令确定未写入线路：not_sent，而不是在途未确认。
+    const offline = await b.adapter.send(request()); assert.equal(offline.status, 'not_sent'); assert.equal(offline.error, 'device_disconnected');
     await b.adapter.pollEvents(() => {});
     assert.equal(b.adapter.getStatus().connected, true);
     assert.equal(b.commands.filter(c => c === 'show_text').length, shows);
@@ -205,7 +208,8 @@ test('没有结束的适配器Promise有5秒上限，不阻塞主任务与正常
     f.trigger(); assert.equal(f.send('submit', { answer: { plans: ['A'] } }).phase, 'UNIT');
     await f.engine.settle();
     const m = f.store.interventions(f.created.session_id)[0];
-    assert.equal(m.status, 'unknown'); assert.equal(m.error, 'adapter_send_timeout_delivery_unknown');
+    // unknown 只留给进程重启；运行中超时视为可能已发出、未确认。
+    assert.equal(m.status, 'unacknowledged'); assert.equal(m.error, 'adapter_send_timeout_unacknowledged');
   } finally { f.store.close(); }
 });
 
@@ -257,4 +261,55 @@ test('共享客户端切换同硬件路由保留事件游标，其他 identity �
    await b.adapter.pollEvents(e=>received.push(e));await b.adapter.pollEvents(e=>received.push(e));
    assert.deepEqual(received,[first,hidden]);assert.equal(b.adapter.getStatus().device_id,'glasses:HW123456');assert.equal(b.commands.filter(c=>c==='show_text').length,1);
  }finally{await b.close();}
+});
+
+
+test('2.2.4 投递状态：发送前取消为 not_sent 且不写入线路；写入后取消为 unacknowledged，均不重发', async () => {
+  const b = await bridge();
+  try {
+    const shows = () => b.commands.filter(c => c === 'show_text').length;
+    const cancelled = new AbortController(); cancelled.abort();
+    const before = await b.adapter.send(request(), { signal: cancelled.signal });
+    assert.equal(before.status, 'not_sent'); assert.equal(shows(), 0);
+    const expired = await b.adapter.send(request(), { deadline: Date.now() - 1 });
+    assert.equal(expired.status, 'not_sent'); assert.equal(shows(), 0);
+    b.hold(); const late = new AbortController(), r = request();
+    const pending = b.adapter.send(r, { signal: late.signal }); await until(() => b.requests.has(r.request_id));
+    late.abort(); const after = await pending;
+    assert.equal(after.status, 'unacknowledged'); assert.equal(after.error, 'device_call_aborted_after_send');
+    b.release(); await delay(20); assert.equal(shows(), 1);
+  } finally { b.release(); await b.close(); }
+});
+
+test('发送前本地校验抛 PreSendError(failed)；允许时长可配置，默认仍为 8500/11000', async () => {
+  const b = await bridge();
+  try {
+    await assert.rejects(b.adapter.send({ ...request(), duration_ms: 9000 }), (e: unknown) => e instanceof PreSendError && e.delivery === 'failed' && e.message === 'device_invalid_stimulus');
+    assert.equal(b.commands.filter(c => c === 'show_text').length, 0);
+    const custom = new SharedGlassesAdapter('test-usb', { run: b.run, durationsMs: [9000] });
+    try { await custom.probe(); assert.equal((await custom.send({ ...request(), duration_ms: 9000 })).status, 'accepted'); await assert.rejects(custom.send({ ...request(), duration_ms: 11000 }), /device_invalid_stimulus/); }
+    finally { await custom.close(); }
+    assert.throws(() => new SharedGlassesAdapter('test-usb', { run: b.run, durationsMs: [0] }), /正整数/);
+  } finally { await b.close(); }
+});
+
+test('Engine：not_sent 与发送前失败如实记录、不补发、不占用显示；session_created 固定版本坐标', async () => {
+  let mode: 'not_sent' | 'failed' = 'not_sent', calls = 0;
+  const adapter: GlassesAdapter = { getStatus: () => ({ source: 'device', connected: true, ready: true, device_id: 'adb:test-usb', device_info: { fixed_duration_ms: '8500,11000', app_version: displayRelease.version } }),
+    send: async () => { calls++; throw new PreSendError(mode === 'not_sent' ? 'device_disconnected' : 'device_capability_missing', mode); } };
+  const store = new Store(':memory:'), engine = new Engine(store, adapter, await loadMaterial(), await testConfig());
+  engine.runVersions = () => ({ experiment_commit: 'abc123', display_base_tag: displayRelease.tag, display_apk_sha256_pinned: displayRelease.sha256 });
+  try {
+    const created = engine.create('000'), id = created.session_id;
+    const s = store.get(id)!; assert.equal(s.snapshot.run_versions?.experiment_commit, 'abc123'); assert.equal(s.snapshot.run_versions?.app_version, displayRelease.version);
+    assert.equal((store.events(id).find(e => e.event_type === 'session_created')!.payload.run_versions as { display_base_tag: string }).display_base_tag, displayRelease.tag);
+    const firstId = randomUUID(); engine.manualNotification(id, firstId, '第一条', 'legacy_8500'); await engine.settle();
+    const first = store.findRequest(firstId)!;
+    assert.equal(first.status, 'not_sent'); assert.equal(first.error, 'device_disconnected');
+    assert.ok(store.get(id)!.state.attention.some(a => a.endsWith(':message_not_sent')));
+    // 确定未显示的消息不阻塞下一条手动通知，也不会被自动补发。
+    mode = 'failed'; const secondId = randomUUID(); engine.manualNotification(id, secondId, '第二条', 'legacy_8500'); await engine.settle();
+    assert.equal(store.findRequest(secondId)!.status, 'failed'); assert.equal(store.findRequest(firstId)!.status, 'not_sent'); assert.equal(calls, 2);
+    await engine.settle(); assert.equal(calls, 2);
+  } finally { await engine.settle(); store.close(); }
 });
