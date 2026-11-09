@@ -24,7 +24,7 @@ A5 实验程序仓库（[5nix/a5-experiments](https://github.com/5nix/a5-experim
 
 启动器只管理由它自己启动的服务，状态和日志保存在 `.launcher/<实验>/`。
 
-Windows 选择 SH 或 SL 的 `1` 启动或 `3` 重启先进入真机后台，首次没有设备配置也不会默认为 Mock；之后在 Web 按「选设备 → 连通道 → 打开显示端 → 试发验证」整备 USB/无线，重启保留后端记住的路由。`4` 可核对实际模式和连接状态；`9/mock` 是显式模拟入口。
+Windows 与 macOS 选择 SH 或 SL 的 `1` 启动或 `3` 重启先进入真机后台，首次没有设备配置也不会默认为 Mock；之后在 Web 按「选设备 → 连通道 → 打开显示端 → 试发验证」整备 USB/无线，重启保留后端记住的路由。`4` 可核对实际模式和连接状态；`9/mock` 是显式模拟入口。
 
 ## 命令
 
@@ -42,6 +42,6 @@ Windows 检出时请保留 `.gitattributes`：材料源文件 `f5-sh-pilot/docs/
 
 ## 共享显示端迁移
 
-固定 `vendor/glasses-display` v2.2.1；提示音由 APK 播放，按能力声明检查，不降级为无声。整备结构、构建产物、协议映射、测试与真机待验清单见 [迁移说明](docs/glasses-display-migration.md)。
+固定 `vendor/glasses-display` v2.2.4（版本、提交与 APK SHA 统一在 `display-release.json`）；提示音由 APK 播放，按能力声明检查，不降级为无声。整备结构、构建产物、协议映射、测试与真机待验清单见 [迁移说明](docs/glasses-display-migration.md)。
 
-运行端无需 Android 编译环境：启动器优先使用 `artifacts/glasses-display-2.2.1-debug.apk`，缺少时下载固定 Release 并校验 SHA-256。私有基座的 submodule 与 Release 需要运行机器的 GitHub 访问权；也可随运行包离线带齐子模块 host 和 APK。详见迁移说明。
+运行端无需 Android 编译环境：启动器优先使用 `.a5-local/device.json` 的 `apkPath`，其次 `artifacts/glasses-display-2.2.4-debug.apk`，缺少时匿名下载固定 Release 并校验 SHA-256；也可随运行包离线带齐子模块 host 和 APK。详见迁移说明。

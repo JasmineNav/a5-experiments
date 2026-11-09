@@ -1,4 +1,4 @@
-import {Backoff,RouteMemory,WirelessSupervisor,adbTransport,listDevices,parseAddress,resolveDeviceIdentity,connectRoute,enableWireless,runDoctor,diagnoseFocus,type DoctorReport} from '@lab/glasses-display';
+import {grantRuntimePermissions,collapseSystemPanel,Backoff,RouteMemory,WirelessSupervisor,adbTransport,listDevices,parseAddress,resolveDeviceIdentity,connectRoute,enableWireless,runDoctor,diagnoseFocus,type DoctorReport} from '@lab/glasses-display';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -8,6 +8,9 @@ import type { DisplayMode, GlassesEvent, GlassesReceipt, GlassesRequest } from '
 import { profile } from './profile.ts';
 import { VoiceOverlayGuard } from './voice-overlay-guard.ts';
 import type { Clock } from './clock.ts';
+import { displayRelease } from '@a5/glasses/display-release.ts';
+import { legacyDisplayPackages } from '@a5/glasses/legacy-display.ts';
+import { sendErrorDelivery } from '@a5/glasses/contracts.ts';
 
 const execute = promisify(execFile);
 type Runner = (file: string, args: string[]) => Promise<string>;
@@ -87,17 +90,20 @@ export class DeviceControl {
   /** 检查是否存在禁止独立测试通知的活跃实验会话。 */
   private activeSession() { return this.engine.store.ids().some(id => this.engine.session(id).state.status === 'active'); }
   /** 在通知结束证据到达或安全窗口过期前保护显示端。 */
-  private hasLiveDebug() { return this.records().some(record => !['failed', 'hidden'].includes(record.status) && (record.display_mode==='confirm_until_ack' ? !record.events.some(e=>e.kind==='hidden') : this.now() - Date.parse(record.created_at) < 15000)); }
+  /** 确认模式只有已绘制且未消失才持续保护；未收到回执的记录只在时长窗口内保护，避免永远挡住「重连/打开」导致无法回收证据。 */
+  private hasLiveDebug() { return this.records().some(record => !['failed', 'hidden', 'not_sent'].includes(record.status) && (
+    record.display_mode==='confirm_until_ack' && record.events.some(e=>e.kind==='drawn') ? !record.events.some(e=>e.kind==='hidden') : this.now() - Date.parse(record.created_at) < Math.max(15000, this.debugDurationMs() + 4000))); }
+  private debugDurationMs() { return this.engine.material.content.message_duration_ms; }
   /** 合并设备忙碌、调试通知和实验消息的展示保护窗口。 */
   private displayProtected() {
     if (this.engine.adapter.getStatus().busy || this.hasLiveDebug()) return true;
     return this.engine.store.ids().some(id => this.engine.store.interventions(id).some(message =>
-      ['scheduled', 'send_requested'].includes(message.status) || !!message.t_send && this.now() - Date.parse(message.t_send) < 11000 && !message.device_events?.some(event => event.kind === 'hidden')));
+      ['scheduled', 'send_requested'].includes(message.status) || !['failed', 'not_sent'].includes(message.status) && !!message.t_send && this.now() - Date.parse(message.t_send) < Math.max(11000, message.duration_ms) && !message.device_events?.some(event => event.kind === 'hidden')));
   }
   /** 返回后台设备控制快照，包括守护诊断、独立通知与审计。 */
   status() {
     return { supported: this.supported(), enabled: this.supported() && this.enabled, working: this.working,
-      route:this.serial,identity_mode:this.identity,hardware_id:this.hardwareId??null,expected_app_version:'2.2.1',link:this.link.status(),remembered_routes:this.routes.all(),
+      route:this.serial,identity_mode:this.identity,hardware_id:this.hardwareId??null,expected_app_version:displayRelease.version,installed_apk:this.versionEvidence(),link:this.link.status(),remembered_routes:this.routes.all(),
       host_stall:this.hostStall,host_retry_in_ms:this.hostStall||!this.hostBackoff.attempts?null:Number.isFinite(this.hostBackoff.nextAt)?Math.max(0,this.hostBackoff.nextAt-this.mono()):null,doctor:this.lastDoctor,clock_samples:this.clockSamples,
       package_name: this.packageName, ...this.diagnostics, active_session: this.activeSession(), voice_guard: this.voiceGuard.status(),
       scrcpy: { running: !!this.mirror && this.mirror.exitCode === null, crop: '640:480:0:0', error: this.mirrorError },
@@ -194,20 +200,51 @@ export class DeviceControl {
     if (this.closed) return;
     await this.run(this.adb, ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_WAKEUP']);
     if (this.closed) return;
-    await this.run(this.adb, ['-s', this.serial, 'shell', 'cmd', 'statusbar', 'collapse']).catch(() => {});
+    await this.stopLegacyDisplay();
+    if (this.closed) return;
+    await this.grantPermissionsOnce();
+    if (this.closed) return;
+    await this.measureInstalledApk();
     if (this.closed) return;
     const result = await this.run(this.adb, ['-s', this.serial, 'shell', 'am', 'start', '-n', `${this.packageName}/link.ironip.glasses.display.MainActivity`]);
     if (/Error|Exception/.test(result)) throw new Error('无法打开指定眼镜显示程序，请确认 APK 已安装。');
     if (this.closed) return;
-    const window = await this.run(this.adb, ['-s', this.serial, 'shell', 'dumpsys', 'window']).catch(() => '');
-    const focus = window.split(/\r?\n/).find(line => line.includes('mCurrentFocus=')) ?? '';
-    const focusedApp = window.split(/\r?\n/).find(line => line.includes('mFocusedApp=')) ?? '';
-    // 仅收起覆盖本显示应用的厂商系统面板，不在正常显示页发返回导致应用退出。
-    if (!this.closed && focusedApp.includes(this.packageName) && focus.includes('com.ffalconxr.mercury.launcher')) {
-      await this.run(this.adb, ['-s', this.serial, 'shell', 'am', 'broadcast', '-a', 'android.intent.action.CLOSE_SYSTEM_DIALOGS']);
-    }
+    // 共享基座负责识别并收起覆盖显示端的系统面板（只在覆盖时广播，不按返回键）。
+    const panel = await collapseSystemPanel(this.target(), { packageName: this.packageName });
+    if (panel.dismissed) this.audit('system_panel_collapsed', { focus: panel.focus });
     if (this.closed) return;
     await this.engine.adapter.probe?.();
+  }
+  private target() { return { run: this.run, adb: this.adb, serial: this.serial }; }
+  /** 旧版 A5 自带显示端若仍在运行会抢前台/屏幕，打开共享显示端前先停止；未安装时 force-stop 无副作用。 */
+  private async stopLegacyDisplay() {
+    for (const pkg of legacyDisplayPackages) if (pkg !== this.packageName) await this.run(this.adb, ['-s', this.serial, 'shell', 'am', 'force-stop', pkg]).catch(() => '');
+  }
+  private permissionsGranted = new Set<string>();
+  /** 每个路由预授一次相机/麦克风权限，避免显示端首启权限框遮挡；失败只审计，不阻止打开。 */
+  private async grantPermissionsOnce() {
+    if (this.permissionsGranted.has(this.serial)) return;
+    const result = await grantRuntimePermissions(this.target(), { packageName: this.packageName });
+    if (result.ok) this.permissionsGranted.add(this.serial); else this.audit('runtime_permissions_incomplete', result.results);
+  }
+  private installedApk: { serial: string; sha256: string | null; error: string | null } | null = null;
+  /** 记录设备上实际安装的显示端 APK SHA-256（每个路由一次），供建会话时写入版本坐标；失败只记 null，不阻止打开。 */
+  private async measureInstalledApk() {
+    if (this.installedApk?.serial === this.serial && this.installedApk.sha256) return;
+    let sha256: string | null = null, error: string | null = null;
+    try {
+      const path = /package:(\S+\.apk)/.exec(await this.run(this.adb, ['-s', this.serial, 'shell', 'pm', 'path', this.packageName]))?.[1];
+      if (!path) throw new Error('apk_path_unavailable');
+      sha256 = /^([0-9a-f]{64})\b/.exec((await this.run(this.adb, ['-s', this.serial, 'shell', 'sha256sum', path])).trim())?.[1] ?? null;
+      if (!sha256) throw new Error('apk_sha256_unavailable');
+    } catch (e) { error = e instanceof Error ? e.message : String(e); }
+    this.installedApk = { serial: this.serial, sha256, error };
+    if (sha256 && sha256 !== displayRelease.sha256) this.audit('display_apk_not_pinned', { installed_sha256: sha256, pinned_sha256: displayRelease.sha256 });
+  }
+  /** 本次运行的设备侧版本证据；路由变化后旧测量不再适用。 */
+  versionEvidence() {
+    const apk = this.installedApk?.serial === this.serial ? this.installedApk : null;
+    return { installed_apk_sha256: apk?.sha256 ?? null, installed_apk_matches_pin: apk?.sha256 ? apk.sha256 === displayRelease.sha256 : null, package_name: this.packageName };
   }
   /** 以请求编号去重发送独立通知，未知结果保留记录且不自动重发。 */
   private async notify(input: { text?: string; request_id?: string; display_mode?: DisplayMode }) {
@@ -229,15 +266,16 @@ export class DeviceControl {
     this.engine.requireFixedDuration(mode);
     const record: DebugRecord = { request_id: input.request_id, text: input.text, device_id: state.device_id, created_at: new Date(this.now()).toISOString(), display_mode:mode,status: 'sending', error: null, events: [] };
     this.save(record);
-    const request: GlassesRequest = { request_id: record.request_id, session_id: `device-debug:${randomUUID()}`, participant_id: 'DEVICE_DEBUG', stage_id: `${profile.stage_prefix}01`, message_id: 'DEVICE_DEBUG', text: record.text, duration_ms: mode === 'confirm_until_ack' ? 8500 : 11000, display_mode:mode, device_id: state.device_id };
+    const request: GlassesRequest = { request_id: record.request_id, session_id: `device-debug:${randomUUID()}`, participant_id: 'DEVICE_DEBUG', stage_id: `${profile.stage_prefix}01`, message_id: 'DEVICE_DEBUG', text: record.text, duration_ms: mode === 'confirm_until_ack' ? 8500 : this.debugDurationMs(), display_mode:mode, device_id: state.device_id };
     try {
       const receipt = await this.engine.adapter.send(request);
       const current = JSON.parse((this.engine.store.db.prepare('SELECT data FROM device_debug_requests WHERE request_id=?').get(record.request_id) as { data: string }).data) as DebugRecord;
       current.receipt = receipt;
       if (!current.events.length || receipt.status === 'failed') { current.status = receipt.status; current.error = receipt.error; }
       this.save(current); return current;
-    } catch {
-      record.status = 'unknown'; record.error = '测试通知发送结果待核查，不会自动重发。'; this.save(record); return record;
+    } catch (error) {
+      // unknown 只用于服务重启；运行中异常按是否可能已发出分 failed / not_sent / unacknowledged，均不自动重发。
+      record.status = sendErrorDelivery(error); record.error = `${error instanceof Error ? error.message : String(error)}；不会自动重发。`; this.save(record); return record;
     }
   }
   /** 隔离定时入口的同步异常；即使数据库不可读也让服务继续处理实验。 */
@@ -350,7 +388,7 @@ export class DeviceControl {
     await this.bind(route,saved?.identity??this.identity);this.audit('route_recall',{route});
   }
   async doctor(){return this.exclusive(async()=>{
-    const report=await runDoctor({run:this.run,adb:this.adb,scrcpy:this.scrcpy,route:this.serial||undefined,packageName:this.packageName,expectedVersion:'2.2.1',expectedDeviceId:this.hardwareId,env:{adb:'A5_ADB_PATH',scrcpy:'A5_SCRCPY_PATH'}});
+    const report=await runDoctor({run:this.run,adb:this.adb,scrcpy:this.scrcpy,route:this.serial||undefined,packageName:this.packageName,expectedVersion:displayRelease.version,expectedDeviceId:this.hardwareId,env:{adb:'A5_ADB_PATH',scrcpy:'A5_SCRCPY_PATH'}});
     await this.engine.adapter.probe?.();const s=this.engine.adapter.getStatus();
     report.checks.push({id:'display_channel',label:'显示端通道',status:s.connected&&s.ready?'ok':'fail',detail:s.error??s.device_info?.app_version??'未就绪',next:s.connected&&s.ready?null:'先连接通道，再打开显示端'});
     this.clockSamples=[];if(s.connected&&this.engine.adapter.clockSample)for(let i=0;i<3;i++){const start=this.mono();const sample=await this.engine.adapter.clockSample();this.clockSamples.push({...sample,rtt_ms:this.mono()-start});}
