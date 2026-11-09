@@ -1,3 +1,4 @@
+import { isSubstepProgress } from '../../public/pilot1108/rules.js';
 import { randomUUID } from 'node:crypto';
 import { Store } from '@a5/desktop/store.ts';
 import { systemClock } from '@a5/desktop/clock.ts';
@@ -39,7 +40,7 @@ export class PilotStore {
       const task = state.trials.find(t => t.task.id === event.task_id)?.task;
       this.shared.event({ event_id: randomUUID(), session_id: state.id,
       participant_id: state.participant, stage_id: event.task_id, unit_id: event.stage ?? null,
-      condition: task?.taskProgress === 'substeps-v1' ? 'task-progress' : task?.taskProgress === 'none' ? 'no-feedback'
+      condition: isSubstepProgress(task?.taskProgress) ? 'task-progress' : task?.taskProgress === 'none' ? 'no-feedback'
         : task?.feedback && task.completionFeedback !== false ? state.config.feedback : 'no-feedback',
       event_type: event.type, elapsed_ms: event.elapsed_ms, timestamp_iso: this.wall(),
       payload: event.data as Record<string, unknown>, content_version: state.material_version,

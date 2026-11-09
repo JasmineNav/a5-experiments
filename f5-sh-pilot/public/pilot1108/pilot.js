@@ -1,11 +1,14 @@
 import { fields, labels, escape, feedbackMarkup } from './feedback.js';
-import { taskProgress } from './rules.js';
+import { taskProgress, isSubstepProgress } from './rules.js';
 const app = document.querySelector('#app');
 const save = document.querySelector('#save');
 const errorBox = document.querySelector('#error');
 const homeEntry = document.querySelector('#home-entry');
 const token = document.querySelector('meta[name="pilot-token"]').content;
 let current = null, chain = Promise.resolve(), pending = 0, loadingTimer = null;
+/** 草稿本防抖：停止输入约500ms才保存一次；离开计算页、切到后台或关闭页面前立即补存。 */
+const SCRATCHPAD_DEBOUNCE_MS = 500;
+let scratchTimer = null, scratchSent = null;
 function showError(message) { errorBox.hidden = false; errorBox.textContent = message; }
 function clearError() { errorBox.hidden = true; errorBox.replaceChildren(); }
 async function api(path, options = {}) {
@@ -35,7 +38,31 @@ function command(action, rerender = false) {
   }).catch(error => showError(error.message)).finally(() => { pending--; updateSaveStatus(); });
   return chain;
 }
+function flushScratchpad({ leaving = false } = {}) {
+  clearTimeout(scratchTimer); scratchTimer = null;
+  const notebook = document.querySelector('#scratchpad');
+  if (!notebook || !current || current.stage !== 'compute' || notebook.value === scratchSent) return;
+  const value = notebook.value; scratchSent = value;
+  if (leaving && !pending) {
+    // 页面卸载时普通请求可能被取消；无排队命令时用 keepalive 直接发出，命令编号仍保证幂等。
+    fetch(`/api/sessions/${current.id}/command`, { method: 'POST', keepalive: true, headers: { 'X-Pilot-Token': token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command_id: crypto.randomUUID(), revision: current.revision, action: { type: 'scratchpad', value } }) }).catch(() => {});
+    return;
+  }
+  command({ type: 'scratchpad', value });
+}
+function bindScratchpad() {
+  const notebook = document.querySelector('#scratchpad'); if (!notebook) return;
+  scratchSent = notebook.value;
+  notebook.addEventListener('input', () => { clearTimeout(scratchTimer); scratchTimer = setTimeout(flushScratchpad, SCRATCHPAD_DEBOUNCE_MS); });
+  notebook.addEventListener('blur', () => flushScratchpad());
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushScratchpad(); });
+window.addEventListener('pagehide', () => flushScratchpad({ leaving: true }));
+// 从往返缓存返回时服务器修订号可能已因补存前进，重新读取会话避免「页面已过期」。
+window.addEventListener('pageshow', event => { if (event.persisted && current && current.stage !== 'done') resume(current.id); });
 function go(action) {
+  flushScratchpad();
   app.querySelectorAll('button,input,select,textarea').forEach(b => b.disabled = true);
   return command(action, true).finally(() => app.querySelectorAll('button,input,select,textarea').forEach(b => b.disabled = false));
 }
@@ -53,25 +80,25 @@ function table(task) {
 }
 function taskHero(v) {
   if (v.task.taskHeader === 'hidden') return '';
-  if (v.task.taskProgress === 'substeps-v1') return taskProgressMarkup(v.stage, v.answers);
+  if (isSubstepProgress(v.task.taskProgress)) return taskProgressMarkup(v.stage, v.answers, v.task.taskProgress);
   if (v.task.taskProgress === 'none') return '<div class="task-progress task-progress-space" aria-hidden="true"><svg viewBox="0 0 600 68"></svg></div>';
   const phases = { scenario: '情景引入', requirements: '任务要求', compute: '计算与筛选', loading: '页面切换', transcribe: '结果提交', submitted: '已提交', ratings: '任务后问卷' };
   const topic = v.task.practice ? '练习任务' : v.task.title.includes('设备租赁') ? '展厅筹备' : '活动筹备';
   return `<section class="task-hero"><div><p class="task-topic">${topic}</p><h1>${escape(v.task.title)}</h1><p class="task-meta">被试 ${escape(v.participant)} · ${v.task.practice ? '练习' : '正式任务'} · ${v.trial_number} / ${v.task_count}</p></div><span class="task-phase">${phases[v.stage] ?? ''}</span></section>`;
 }
-function taskProgressMarkup(stage, answers) {
-  const progress = taskProgress(stage, answers), percent = Math.round(progress.value * 100) / 100;
+function taskProgressMarkup(stage, answers, mode) {
+  const progress = taskProgress(stage, answers, mode), percent = Math.round(progress.value * 100) / 100;
   const nodes = ['开始任务', '完成筛选', '提交完成'];
   return `<section id="task-progress" class="task-progress" role="progressbar" aria-label="任务进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}" aria-valuetext="${percent}%，${progress.submitted ? '提交完成' : progress.value >= 50 ? '完成筛选，正在提交' : '计算与筛选'}"><svg viewBox="0 0 600 68" aria-hidden="true"><path class="task-progress-track" d="M50 16H550"/><path class="task-progress-fill" d="M50 16H550" pathLength="100" stroke-dasharray="${progress.value} 100"/>${nodes.map((label, i) => `<g class="task-progress-node${progress.value >= i * 50 ? ' reached' : ''}"><circle cx="${50 + i * 250}" cy="16" r="6"/><text x="${50 + i * 250}" y="52" text-anchor="middle">${label}</text></g>`).join('')}</svg></section>`;
 }
 function updateTaskProgress() {
   const target = document.querySelector('#task-progress');
-  if (!target || current?.task.taskProgress !== 'substeps-v1') return;
+  if (!target || !isSubstepProgress(current?.task.taskProgress)) return;
   const answers = { ...current.answers };
   app.querySelectorAll('[data-field]').forEach(input => { answers[input.dataset.field] = input.value; });
   if (current.stage === 'compute') answers.qualified = [...app.querySelectorAll('[type=checkbox]:checked')].map(input => input.value).join('、');
   // 只替换顶部进度，保留正在编辑的输入框及光标；取当前字段状态，不累加点击次数。
-  target.outerHTML = taskProgressMarkup(current.stage, answers);
+  target.outerHTML = taskProgressMarkup(current.stage, answers, current.task.taskProgress);
 }
 function conditionDetails(task) {
   const conditions = taskConditions(task), split = conditions[0].indexOf('（');
@@ -91,8 +118,7 @@ function sourceTable(source) {
 }
 function bindCalculationControls() {
   bindInputs();
-  const notebook = document.querySelector('#scratchpad');
-  if (notebook) notebook.addEventListener('input', () => command({ type: 'scratchpad', value: notebook.value }));
+  bindScratchpad();
   app.querySelectorAll('[type=checkbox]').forEach(input => input.onchange = () => {
     command({ type: 'input', field: 'qualified', value: [...app.querySelectorAll('[type=checkbox]:checked')].map(i => i.value).join('、') });
     updateTaskProgress();
@@ -170,8 +196,7 @@ function render() {
     const conditions = task.practice ? '' : `<section id="calculation-conditions" class="panel calculation-conditions" aria-labelledby="calculation-conditions-title"><h3 id="calculation-conditions-title">筛选条件</h3><ul>${taskConditions(task).map(text => `<li>${escape(text)}</li>`).join('')}</ul></section>`;
     app.innerHTML = `${prefix}<h2>界面2 · 算费用、选方案</h2>${conditions}<div class="columns">${scratchpad ? `<div class="materials-column">${materials}${scratchpad}</div>` : materials}<section class="panel">${inputFields(v.answers, ['A', 'B', 'C', 'D'])}<p class="hint">费用请保留两位小数，例如练习题填1.50。</p><fieldset><legend>选择符合要求的方案（可多选）</legend>${['A', 'B', 'C', 'D'].map(f => `<label class="check"><input type="checkbox" value="${f}" ${selected.includes(f) ? 'checked' : ''}>${f}</label>`).join('')}</fieldset><button id="next">下一步</button></section></div>`;
     bindInputs();
-    const notebook = document.querySelector('#scratchpad');
-    if (notebook) notebook.addEventListener('input', () => command({ type: 'scratchpad', value: notebook.value }));
+    bindScratchpad();
     app.querySelectorAll('[type=checkbox]').forEach(input => input.onchange = () => command({ type: 'input', field: 'qualified', value: [...app.querySelectorAll('[type=checkbox]:checked')].map(i => i.value).join('、') }));
     document.querySelector('#requirements').onclick = () => go({ type: 'requirements' });
     document.querySelector('#next').onclick = () => go({ type: 'next' });
@@ -249,6 +274,7 @@ async function resume(id) {
 homeEntry.onclick = async () => {
   clearTimeout(loadingTimer);
   // 等待已排队的输入保存完成，再回设置页；不删除、结束或重置会话。
+  flushScratchpad();
   homeEntry.disabled = true;
   app.querySelectorAll('button,input,select,textarea').forEach(control => control.disabled = true);
   try { await chain; await home(); }

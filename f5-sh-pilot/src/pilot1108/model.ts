@@ -1,4 +1,4 @@
-import { feeFilled, planSelection, filledState, taskProgress } from '../../public/pilot1108/rules.js';
+import { feeFilled, planSelection, filledState, taskProgress, isSubstepProgress } from '../../public/pilot1108/rules.js';
 /** 11-08 材料可行性 pilot；不加载正式 SH 状态机或眼镜适配器。 */
 export const PLANS = ['A', 'B', 'C', 'D'] as const;
 export const FIELDS = ['qualified', ...PLANS] as const;
@@ -15,7 +15,7 @@ export interface Task {
   maxCost: number; maxDays: number; minPeople: number;
   extraMultiplier?: number; scratchpad?: boolean; scenarioPage?: boolean; transcriptionDelayMs?: number;
   presentation?: 'cards'; completionFeedback?: boolean; submissionPage?: boolean;
-  taskProgress?: 'none' | 'substeps-v1';
+  taskProgress?: 'none' | 'substeps-v1' | 'substeps-v2';
   taskHeader?: 'hidden';
   requirements?: { context: string; premise: string; cost: string; time: string; capacity: string };
   tableHeaders?: string[]; confirmationTitle?: string;
@@ -48,7 +48,7 @@ export const NO_FEEDBACK: Task = {
 };
 export const WITH_FEEDBACK: Task = {
   ...NO_FEEDBACK, id: 'SH01-feedback', title: '筛选设备租赁方案', feedback: true,
-  taskProgress: 'substeps-v1',
+  taskProgress: 'substeps-v2',
   requirements: {
     context: '你需要为体验展厅选择设备租赁方案，租期为3个月。今天13:00—13:45要和同事交接活动资料，14:00还要参加线上评审会。',
     premise: '你需要为体验展厅选择设备租赁方案，租期为3个月，每个月都需要收一次维护费。',
@@ -109,7 +109,7 @@ export interface Trial {
   scale1: Ratings | null; scale2: Ratings | null;
 }
 export interface State {
-  schema_version: 2; material_version: 'sh-pilot-2026-11-08-r2' | 'sh-pilot-2026-11-08-r3' | 'sh-pilot-2026-11-08-r4' | 'sh-pilot-2026-11-08-r5' | 'sh-pilot-2026-11-08-r6' | 'sh-pilot-2026-11-08-r7' | 'sh-pilot-2026-11-09-r8' | 'sh-pilot-2026-11-09-r9' | 'sh-pilot-2026-11-09-r10'; id: string; participant: string; config: Config;
+  schema_version: 2; material_version: 'sh-pilot-2026-11-08-r2' | 'sh-pilot-2026-11-08-r3' | 'sh-pilot-2026-11-08-r4' | 'sh-pilot-2026-11-08-r5' | 'sh-pilot-2026-11-08-r6' | 'sh-pilot-2026-11-08-r7' | 'sh-pilot-2026-11-09-r8' | 'sh-pilot-2026-11-09-r9' | 'sh-pilot-2026-11-09-r10' | 'sh-pilot-2026-11-09-r11'; id: string; participant: string; config: Config;
   trials: Trial[]; index: number; stage: Stage; revision: number; elapsed_ms: number; created_at: string;
   deleted?: { deleted_at: string; reason: string };
 }
@@ -119,7 +119,7 @@ export type Action = { type: 'compute' | 'requirements' | 'next' | 'transcribe' 
 export interface Event { type: string; elapsed_ms: number; task_id: string; stage?: Stage; data: unknown }
 export function initial(id: string, participant: string, config: Config, at: string): State {
   if (!/^[A-Za-z0-9_-]{1,40}$/.test(participant)) throw new Error('被试编号仅允许1—40位字母、数字、下划线或连字符。');
-  return { schema_version: 2, material_version: 'sh-pilot-2026-11-09-r10', id, participant, config, created_at: at,
+  return { schema_version: 2, material_version: 'sh-pilot-2026-11-09-r11', id, participant, config, created_at: at,
     index: 0, stage: 'requirements', revision: 0, elapsed_ms: 0,
     trials: taskSequence(config).map(task => ({ task, compute: emptyAnswers(), transcription: emptyAnswers(), source: null,
       ...(task.scratchpad ? { scratchpad: '' } : {}),
@@ -143,7 +143,7 @@ export function transition(previous: State, action: Action, now: number): { stat
   const state = structuredClone(previous);
   if (state.stage === 'done') throw new Error('会话已完成。');
   const t = state.trials[state.index];
-  const progressBefore = t.task.taskProgress === 'substeps-v1' ? progressView(state) : null;
+  const progressBefore = isSubstepProgress(t.task.taskProgress) ? progressView(state) : null;
   const events = marker(state, now);
   const emit = (type: string, data: unknown = {}) => events.push({ type, elapsed_ms: now, task_id: t.task.id, stage: state.stage, data });
   const startTranscription = () => { state.stage = 'transcribe'; t.step2_start_ms = now; emit('phase2_started'); };
@@ -155,8 +155,9 @@ export function transition(previous: State, action: Action, now: number): { stat
     state.stage = 'requirements'; emit('requirements_revisited');
   } else if (action.type === 'scratchpad' && state.stage === 'compute' && t.task.scratchpad) {
     if (typeof action.value !== 'string' || action.value.length > 5000) throw new Error('草稿本最多可输入5000个字符。');
-    const previous = t.scratchpad ?? ''; t.scratchpad = action.value;
-    emit('scratchpad_changed', { previous, value: action.value });
+    // R11起只记新值（前值即上一条事件的value）；旧导出中的previous字段原样保留可读。
+    t.scratchpad = action.value;
+    emit('scratchpad_changed', { value: action.value });
   } else if (action.type === 'input' && ['compute', 'transcribe'].includes(state.stage)) {
     if (!FIELDS.includes(action.field) || typeof action.value !== 'string' || action.value.length > 100) throw new Error('输入字段或长度无效。');
     const answers = state.stage === 'compute' ? t.compute : t.transcription;
@@ -208,7 +209,7 @@ export function transition(previous: State, action: Action, now: number): { stat
   } else throw new Error('当前页面不允许此操作。');
   if (progressBefore) {
     // 切换试次时仍记录刚刚完成的试次，不把新试次的0%记到旧试次。
-    const progressAfter = state.index !== previous.index ? taskProgress('submitted', t.transcription) : progressView(state);
+    const progressAfter = state.index !== previous.index ? taskProgress('submitted', t.transcription, t.task.taskProgress as 'substeps-v1' | 'substeps-v2') : progressView(state);
     if (progressAfter && (progressBefore.value !== progressAfter.value || JSON.stringify(progressBefore.filled) !== JSON.stringify(progressAfter.filled))) {
       events.push({ type: 'task_progress_state', elapsed_ms: now, task_id: t.task.id, stage: state.index !== previous.index ? 'submitted' : state.stage,
         data: { ...progressAfter, evidence: 'server_accepted_format_state' } });
@@ -249,7 +250,7 @@ export function summary(t: Trial) {
 /** 公开视图不泄露标准答案/正确率；界面3固定返回被试本人刚才的计算输入。 */
 function progressView(state: State) {
   const t = state.trials[state.index];
-  return t.task.taskProgress === 'substeps-v1' ? taskProgress(state.stage, state.stage === 'transcribe' ? t.transcription : t.compute) : null;
+  return isSubstepProgress(t.task.taskProgress) ? taskProgress(state.stage, state.stage === 'transcribe' ? t.transcription : t.compute, t.task.taskProgress as 'substeps-v1' | 'substeps-v2') : null;
 }
 export function view(state: State) {
   const t = state.trials[state.index];

@@ -94,6 +94,7 @@ test('1108r3：草稿本仅限正式计算页，不作为答案或触发T0/T2，
   const result = transition(s, { type: 'scratchpad', value: 'A：13.17 + 1.29 × 3\n=17.04' }, 5000); s = result.state;
   assert.deepEqual(s.trials[1].compute, answers); assert.equal(s.trials[1].t0_ms, null); assert.equal(s.trials[1].t2_ms, null);
   assert.deepEqual(result.events.map(e => e.type), ['scratchpad_changed']);
+  assert.deepEqual(result.events[0].data, { value: 'A：13.17 + 1.29 × 3\n=17.04' }); // R11起不再重复记录前值。
   s = act(s, { type: 'requirements' }); s = act(s, { type: 'compute' });
   assert.equal(view(s).scratchpad, 'A：13.17 + 1.29 × 3\n=17.04');
   assert.throws(() => act(s, { type: 'scratchpad', value: 'x'.repeat(5001) }), /5000/);
@@ -141,6 +142,47 @@ test('1108r3：旧快照未声明倍数与草稿时仍按旧公式计分，不�
   assert.equal(Object.hasOwn(view(s), 'scratchpad'), false);
   assert.throws(() => act(s, { type: 'scratchpad', value: '旧会话不引入新功能' }), /不允许/);
 });
+test('1108r11：计算页最多45%，点下一步进入加载/转录才到50%点亮「完成筛选」；R8—R10旧快照保留10%计法', () => {
+  const answers = emptyAnswers();
+  answers.D = '999.00'; assert.equal(taskProgress('compute', answers, 'substeps-v2').value, 9);
+  Object.assign(answers, { A: '0.00', B: '1.50', C: '0.00', qualified: 'B' });
+  assert.equal(taskProgress('compute', answers, 'substeps-v2').value, 45);
+  assert.equal(taskProgress('requirements', answers, 'substeps-v2').value, 45);
+  assert.ok(taskProgress('compute', answers, 'substeps-v2').value < 50);
+  assert.equal(taskProgress('loading', emptyAnswers(), 'substeps-v2').value, 50);
+  assert.equal(taskProgress('transcribe', emptyAnswers(), 'substeps-v2').value, 50);
+  assert.equal(taskProgress('transcribe', answers, 'substeps-v2').value, 50 + 5 * 50 / 6);
+  assert.equal(taskProgress('submitted', answers, 'substeps-v2').value, 100);
+  assert.equal(taskProgress('compute', answers, 'substeps-v2').mode, 'substeps-v2');
+  assert.equal(taskProgress('compute', answers).value, 50); assert.equal(taskProgress('compute', answers).mode, 'substeps-v1');
+});
+
+test('1108r11：浏览器草稿本防抖保存，下一步、返回要求、回设置页、切后台和离开页面前补存', async () => {
+  const js = await readFile(new URL('../public/pilot1108/pilot.js', import.meta.url), 'utf8');
+  assert.match(js, /SCRATCHPAD_DEBOUNCE_MS = 500/);
+  assert.doesNotMatch(js, /addEventListener\('input', \(\) => command\(\{ type: 'scratchpad'/);
+  assert.match(js, /setTimeout\(flushScratchpad, SCRATCHPAD_DEBOUNCE_MS\)/);
+  assert.match(js, /function go\(action\) \{\n  flushScratchpad\(\);/); // 下一步与返回要求均经 go()。
+  assert.match(js, /visibilityState === 'hidden'\) flushScratchpad\(\)/);
+  assert.match(js, /'pagehide', \(\) => flushScratchpad\(\{ leaving: true \}\)/);
+  assert.match(js, /keepalive: true/);
+  assert.match(js, /保存完成，再回设置页；不删除、结束或重置会话。\n  flushScratchpad\(\);/);
+  assert.equal(js.match(/bindScratchpad\(\);/g)!.length, 2); // 两套计算页渲染共用同一机制。
+});
+
+test('1108r11：含previous的旧草稿事件仍可导出读取', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'a5-1108-oldnotes-')); const path = join(dir, 'pilot.sqlite');
+  let store = new PilotStore(path); const created = store.create('P01', {});
+  try {
+    store.shared.event({ event_id: 'old-notes', session_id: created.id, participant_id: 'P01', stage_id: 'SH01-feedback', unit_id: 'compute',
+      condition: 'task-progress', event_type: 'scratchpad_changed', elapsed_ms: 1, timestamp_iso: '2026-11-09T06:00:00.000Z',
+      payload: { previous: '旧', value: '旧草稿' }, content_version: 'sh-pilot-2026-11-09-r10', data_kind: 'pilot1108' });
+    store.close(); store = new PilotStore(path);
+    const old = store.export(created.id).events.find(e => e.type === 'scratchpad_changed')!;
+    assert.deepEqual(old.data, { previous: '旧', value: '旧草稿' });
+  } finally { store.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
 test('1108r2：只平衡顺序，材料与条件固定配对；四人分配与显式覆盖', () => {
   assert.deepEqual(['P01', 'P02', 'P03', 'P04', 'P05'].map(p => configuration(p).order), ['no-feedback-first', 'no-feedback-first', 'feedback-first', 'feedback-first', 'no-feedback-first']);
   assert.equal(taskSequence(configuration('P01', { order: 'feedback-first' }))[1].id, 'SH01-feedback');
@@ -324,26 +366,27 @@ test('1108r9：每人一个有进度和一个无进度，恢复原配对与条�
   for (let participant = 1; participant <= 8; participant++) {
     const id = `P0${participant}`, config = configuration(id);
     let s = initial(id, id, config, '2026-11-09T06:00:00Z');
-    const expected = (participant - 1) % 4 < 2 ? ['none', 'substeps-v1'] : ['substeps-v1', 'none'];
+    const expected = (participant - 1) % 4 < 2 ? ['none', 'substeps-v2'] : ['substeps-v2', 'none'];
     assert.deepEqual(s.trials.slice(1).map(t => t.task.taskProgress), expected);
     assert.equal(s.trials.find(t => t.task.id === 'SH01-no-feedback')!.task.taskProgress, 'none');
-    assert.equal(s.trials.find(t => t.task.id === 'SH01-feedback')!.task.taskProgress, 'substeps-v1');
+    assert.equal(s.trials.find(t => t.task.id === 'SH01-feedback')!.task.taskProgress, 'substeps-v2');
     assert.equal(s.trials[0].task.taskProgress, 'none'); assert.equal(s.trials[0].task.taskHeader, 'hidden');
     s = finishTrial(s);
     for (let trial = 1; trial <= 2; trial++) {
-      const enabled = s.trials[trial].task.taskProgress === 'substeps-v1';
+      const enabled = s.trials[trial].task.taskProgress !== 'none';
       s = act(s, { type: 'compute' });
       assert.equal(view(s).task_progress?.value ?? null, enabled ? 0 : null);
       const edited = transition(s, { type: 'input', field: 'D', value: '999.00' }, s.elapsed_ms + 100); s = edited.state;
       assert.equal(edited.events.some(e => e.type === 'task_progress_state'), enabled);
-      assert.equal(view(s).task_progress?.value ?? null, enabled ? 10 : null);
-      s = act(fill(s), { type: 'next' }); assert.equal(s.stage, 'transcribe');
+      assert.equal(view(s).task_progress?.value ?? null, enabled ? 9 : null);
+      s = fill(s); assert.equal(view(s).task_progress?.value ?? null, enabled ? 45 : null); // 未点下一步前不到「完成筛选」节点。
+      s = act(s, { type: 'next' }); assert.equal(s.stage, 'transcribe');
       assert.equal(view(s).task_progress?.value ?? null, enabled ? 50 : null);
       const transcribed = transition(s, { type: 'input', field: 'A', value: '999.00' }, s.elapsed_ms + 100); s = transcribed.state;
       assert.equal(transcribed.events.some(e => e.type === 'task_progress_state'), enabled);
       s = act(fill(s), { type: 'next' }); assert.equal(s.stage, 'submitted');
       assert.equal(view(s).task_progress?.value ?? null, enabled ? 100 : null);
-      assert.equal(summary(s.trials[trial]).task_progress_mode, enabled ? 'substeps-v1' : 'none');
+      assert.equal(summary(s.trials[trial]).task_progress_mode, enabled ? 'substeps-v2' : 'none');
       s = act(s, { type: 'continue' }); s = act(s, { type: 'ratings', values: questionnaire });
     }
     assert.equal(s.stage, 'done');
@@ -577,7 +620,7 @@ test('1108r2：两种顺序的持久化完整会话，双阶段问卷、候选�
       assert.equal(exported.events.filter(e => e.type === 'questionnaire_opened').length, 2); assert.equal(exported.events.filter(e => e.type === 't0_behavioral_candidate').length, 3);
       assert.equal(exported.events.filter(e => e.type === 't0_20s_secondary').length, 3);
       assert.ok(exported.trials.every(t => t.phase1_accuracy!.accuracy === 1 && t.phase2_copy_accuracy!.accuracy === 1));
-      assert.deepEqual(exported.trials.slice(1).map(t => t.task_progress_mode).sort(), ['none', 'substeps-v1']);
+      assert.deepEqual(exported.trials.slice(1).map(t => t.task_progress_mode).sort(), ['none', 'substeps-v2']);
       assert.equal(exported.events.some(e => e.type === 'task_progress_state' && e.task_id === NO_FEEDBACK.id), false);
       assert.ok(exported.events.filter(e => e.task_id === NO_FEEDBACK.id).every(e => e.condition === 'no-feedback'));
       assert.ok(exported.events.filter(e => e.task_id === WITH_FEEDBACK.id).every(e => e.condition === 'task-progress'));
@@ -596,7 +639,7 @@ test('1108r2：HTTP创建、逐步作答、导出、固定配置拒绝覆盖、�
     const response = await fetch(base + '/api/sessions', { method: 'POST', headers, body: JSON.stringify({ participant: 'P01' }) }); assert.equal(response.status, 201); const v = await response.json() as ReturnType<typeof view>;
     const result = await fetch(base + `/api/sessions/${v.id}/command`, { method: 'POST', headers, body: JSON.stringify({ command_id: 'http-1', revision: 0, action: { type: 'compute' } }) }); assert.equal((await result.json() as ReturnType<typeof view>).stage, 'compute');
     const exported = await fetch(base + `/api/sessions/${v.id}/export`, { headers }); assert.match(exported.headers.get('content-disposition')!, /attachment/);
-    const log = await exported.json() as ReturnType<PilotStore['export']>; assert.equal(log.actual_interruption, false); assert.equal(log.state.material_version, 'sh-pilot-2026-11-09-r10');
+    const log = await exported.json() as ReturnType<PilotStore['export']>; assert.equal(log.actual_interruption, false); assert.equal(log.state.material_version, 'sh-pilot-2026-11-09-r11');
     for (const path of ['/pilot.js', '/feedback.js', '/rules.js', '/pilot.css']) assert.equal((await fetch(base + path)).status, 200);
     for (const config of [{ unknown: true }, { source: 'standard' }, { feedback: 'message' }, { practiceFeedback: true }]) assert.equal((await fetch(base + '/api/sessions', { method: 'POST', headers, body: JSON.stringify({ participant: 'P02', config }) })).status, 400);
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); store.close(); }
